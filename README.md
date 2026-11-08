@@ -39,6 +39,9 @@ Built with the Arduino-ESP32 Matter library on top of [Espressif's ESP-Matter](h
 - **Persistent state** for the last on/off setting and brightness.
 - **Maintenance tools** for pairing, resets, and firmware uploads.
 
+> [!IMPORTANT]
+> This project involves modifying the hardware of the original expensive lamp. Your warranty will definitely void. However, as restoring the original only requires soldering, I wouldn't call it a destructive modification.
+
 > [!NOTE]
 > This is an independent DIY modification, not an official Louis Poulsen product or a claim of Matter certification. Hardware revisions can differ; the firmware alone does not make a stock lamp compatible.
 
