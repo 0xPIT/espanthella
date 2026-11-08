@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>espANTHELLA — Firmware Update</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="card wide">
+  <div class="logo"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></div>
+  <h2>Firmware Update</h2>
+  <p class="sub">Upload a combined or plain firmware image</p>
+  <form id="form" method="POST" action="/update" enctype="multipart/form-data">
+    <label for="fw">Image file (.bin)</label>
+    <input type="file" name="firmware" id="fw" accept=".bin">
+    <button type="submit">Upload &amp; Flash</button>
+  </form>
+  <div id="prog">
+    <span id="pct">0%</span>
+    <div class="bar-bg"><div class="bar" id="bar"></div></div>
+  </div>
+  <div class="foot"><a href="/">&#8592; Dashboard</a></div>
+</div>
+<script>
+document.getElementById('form').addEventListener('submit', function(e) {
+  e.preventDefault();
+  var f = document.getElementById('fw').files[0];
+  if (!f) return;
+  var xhr = new XMLHttpRequest();
+  var prog = document.getElementById('prog');
+  var bar = document.getElementById('bar');
+  var pct = document.getElementById('pct');
+  prog.style.display = 'block';
+  xhr.upload.addEventListener('progress', function(ev) {
+    if (ev.lengthComputable) {
+      var p = Math.round(ev.loaded / ev.total * 100);
+      bar.style.width = p + '%';
+      pct.textContent = p + '%';
+    }
+  });
+  xhr.onreadystatechange = function() {
+    if (xhr.readyState === 4) {
+      pct.textContent = xhr.status === 200 ? 'Done — rebooting…' : 'Error: ' + xhr.responseText;
+    }
+  };
+  var fd = new FormData();
+  fd.append('firmware', f);
+  xhr.open('POST', '/update');
+  xhr.send(fd);
+});
+</script>
+</body>
+</html>

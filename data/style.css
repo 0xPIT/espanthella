@@ -1,0 +1,370 @@
+/* espANTHELLA — Louis Poulsen–inspired design system */
+
+:root {
+  --bg:             #FAF9F7;
+  --card:           #fff;
+  --border:         #E8E5E0;
+  --border-light:   #F0EDE8;
+  --border-row:     #F5F3F0;
+  --input-border:   #D4D0C8;
+  --text:           #1A1A1A;
+  --text-secondary: #8A8A8A;
+  --text-muted:     #C4C0B8;
+  --accent:         #B8935A;
+  --accent-hover:   #9A7840;
+  --danger:         #8B2500;
+  --danger-hover:   #6B1D00;
+  --confirm-bg:     #FFFAF5;
+  --confirm-border: #E8DDD0;
+  --font:           'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --radius:         2px;
+}
+
+/* ── Reset ─────────────────────────────────────────────────────────── */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Base ──────────────────────────────────────────────────────────── */
+
+body {
+  font-family: var(--font);
+  background:  var(--bg);
+  color:       var(--text);
+  min-height:  100vh;
+  display:     flex;
+  justify-content: center;
+  align-items: center;
+  padding:     1.5rem;
+}
+
+body.top { align-items: flex-start; }
+
+/* ── Typography ────────────────────────────────────────────────────── */
+
+h1 {
+  font-size: 1.1rem; font-weight: 400;
+  letter-spacing: .14em; text-transform: uppercase;
+  margin: .6rem 0 .3rem;
+}
+
+h2 {
+  font-size: 1.1rem; font-weight: 400;
+  letter-spacing: .12em; text-transform: uppercase;
+  text-align: center; color: var(--text);
+  margin-bottom: .4rem;
+}
+
+p {
+  color: var(--text-secondary);
+  font-size: .9rem; line-height: 1.6; font-weight: 300;
+}
+
+a {
+  color: var(--accent); text-decoration: none;
+  font-size: .85rem; letter-spacing: .05em;
+}
+a:hover { color: var(--accent-hover); }
+
+strong { color: var(--text); font-weight: 500; }
+
+label {
+  display: block; margin: 1.2rem 0 .4rem;
+  font-size: .75rem; letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-secondary); font-weight: 400;
+}
+
+/* ── Card layout ───────────────────────────────────────────────────── */
+
+.card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2.5rem 2rem; max-width: 400px; width: 100%;
+}
+
+.card.centered {
+  text-align: center; padding: 3rem 2.5rem;
+}
+.card.centered h2 {
+  margin-bottom: 1rem;
+}
+
+.card.action h2 {
+  font-size: 1.05rem; letter-spacing: .06em; text-transform: none;
+}
+
+.card.wide { max-width: 420px; }
+
+/* ── Dashboard wrap ────────────────────────────────────────────────── */
+
+.wrap { max-width: 460px; width: 100%; }
+
+/* ── Shared components ─────────────────────────────────────────────── */
+
+.logo    { text-align: center; margin-bottom: 2rem; }
+.logo span { font-size: 2.4rem; }
+
+.icon { font-size: 2.4rem; margin-bottom: 1.2rem; }
+
+.sub {
+  text-align: center; color: var(--text-secondary);
+  font-size: .85rem; font-weight: 300; margin-bottom: 2rem;
+}
+
+.divider {
+  text-align: center; color: var(--text-muted);
+  font-size: .75rem; margin: .8rem 0;
+  letter-spacing: .1em; text-transform: uppercase;
+}
+
+.foot {
+  text-align: center; margin-top: 1.8rem;
+  padding-top: 1.2rem; border-top: 1px solid var(--border);
+}
+.foot a { font-size: .8rem; }
+.foot .ip {
+  display: block; color: var(--text-muted);
+  font-size: .7rem; margin-top: .5rem;
+}
+
+.back { margin-top: 2rem; }
+
+/* ── Dashboard header ──────────────────────────────────────────────── */
+
+.header {
+  text-align: center; margin-bottom: 1.5rem;
+  /* padding-bottom: 1.5rem; border-bottom: 1px solid var(--border); */
+}
+.header span { font-size: 2rem; }
+.header .sub { margin-bottom: 0; font-size: .8rem; letter-spacing: .05em; }
+
+/* ── Dashboard sections ────────────────────────────────────────────── */
+
+.section {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.4rem 1.6rem; margin-bottom: 1rem;
+}
+
+.section h3 {
+  font-size: .9rem; font-weight: 400;
+  letter-spacing: .14em; text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .9rem; padding-bottom: .6rem;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: .4rem 0; font-size: .88rem;
+}
+.row + .row { border-top: 1px solid var(--border-row); }
+.row .lbl   { color: var(--text-secondary); font-weight: 300; }
+.row .val   { color: var(--text); font-weight: 400; text-align: right;
+              max-width: 60%; word-break: break-all; }
+
+/* ── Dashboard navigation ──────────────────────────────────────────── */
+
+.nav {
+  text-align: center; margin-top: 1.2rem;
+  padding-top: 1rem; border-top: 1px solid var(--border);
+}
+.nav a { font-size: .8rem; }
+
+/* ── Forms ─────────────────────────────────────────────────────────── */
+
+select,
+input[type=text],
+input[type=password] {
+  width: 100%; height: 2.8rem; padding: .7rem .8rem;
+  border: 1px solid var(--input-border); border-radius: var(--radius);
+  background: var(--card); color: var(--text);
+  font-size: .95rem; font-family: inherit;
+  outline: none; transition: border-color .2s;
+}
+
+input[type=file] {
+  width: 100%; padding: .7rem .8rem;
+  border: 1px solid var(--input-border); border-radius: var(--radius);
+  background: var(--card); color: var(--text);
+  font-size: .9rem; font-family: inherit;
+}
+
+select:focus, input:focus { border-color: var(--accent); }
+
+button[type=submit] {
+  width: 100%; padding: .85rem; border: none;
+  border-radius: var(--radius);
+  background: var(--text); color: var(--bg);
+  font-size: .85rem; font-weight: 400;
+  letter-spacing: .12em; text-transform: uppercase;
+  margin-top: 1.5rem; cursor: pointer;
+  font-family: inherit; transition: background .2s;
+}
+button[type=submit]:hover  { background: #333; }
+button[type=submit]:active { background: #000; }
+
+/* ── Buttons ───────────────────────────────────────────────────────── */
+
+.btn {
+  display: block; width: 100%; padding: .75rem;
+  border-radius: var(--radius); border: none;
+  font-size: .8rem; font-weight: 400;
+  letter-spacing: .1em; text-transform: uppercase;
+  cursor: pointer; text-align: center; text-decoration: none;
+  font-family: inherit; transition: background .2s;
+}
+.btn-primary       { background: var(--text);   color: var(--bg); }
+.btn-primary:hover { background: #333; }
+.btn-danger        { background: var(--danger);  color: var(--bg); }
+.btn-danger:hover  { background: var(--danger-hover); }
+.btn-outline       { background: transparent; color: var(--text);
+                     border: 1px solid var(--input-border); }
+.btn-outline:hover { border-color: var(--text); }
+
+/* ── Actions & confirmations ───────────────────────────────────────── */
+
+.actions {
+  display: flex; flex-direction: column;
+  gap: .5rem; margin-top: .2rem;
+}
+
+.confirm {
+  display: none; background: var(--confirm-bg);
+  border: 1px solid var(--confirm-border);
+  border-radius: var(--radius);
+  padding: 1.2rem; margin-top: .5rem; text-align: center;
+}
+.confirm.show { display: block; }
+.confirm p {
+  margin-bottom: 1rem; color: #6B6B6B;
+  font-size: .85rem; font-weight: 300; line-height: 1.5;
+}
+.confirm .row-btns     { display: flex; gap: .5rem; }
+.confirm .row-btns .btn { flex: 1; }
+
+/* ── Pairing QR code ───────────────────────────────────────────────── */
+
+.pair { text-align: center; padding-top: .6rem; }
+.pair svg,
+.pair #qr {
+  width: 180px; height: 180px; margin: 1rem auto; display: block;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 8px; background: var(--card);
+}
+.pair #qr { width: auto; height: auto; display: inline-block; }
+.pair .code {
+  font-family: 'Courier New', monospace;
+  font-size: 1.3rem; font-weight: 500;
+  letter-spacing: .15em; color: var(--text);
+  margin: .8rem 0 .3rem;
+}
+.pair .hint {
+  font-size: .78rem; color: var(--text-secondary);
+  font-weight: 300; line-height: 1.5;
+}
+
+/* ── Toggle switch ────────────────────────────────────────────────── */
+
+.toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 44px;
+  flex-shrink: 0;
+  cursor: pointer;
+  margin: 0;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.toggle input {
+  position: absolute; opacity: 0; width: 0; height: 0;
+}
+.toggle .track {
+  width: 44px; height: 24px; position: relative;
+  background: var(--input-border);
+  border-radius: 12px;
+  transition: background .25s;
+}
+.toggle .track::before {
+  content: '';
+  position: absolute;
+  width: 18px; height: 18px;
+  left: 3px; top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform .25s;
+  box-shadow: 0 1px 3px rgba(0,0,0,.12);
+}
+.toggle input:checked + .track {
+  background: var(--accent);
+}
+.toggle input:checked + .track::before {
+  transform: translateX(20px);
+}
+
+/* ── Brightness slider ────────────────────────────────────────────── */
+
+.brightness {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  transition: opacity .3s;
+}
+.brightness.off { opacity: .3; }
+
+.brightness input[type=range] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 120px; height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+.brightness input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px; height: 18px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0,0,0,.12);
+}
+.brightness input[type=range]::-moz-range-thumb {
+  width: 18px; height: 18px;
+  background: var(--accent);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0,0,0,.12);
+}
+.brightness input[type=range]::-moz-range-track {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  border: none;
+}
+.brightness .pct {
+  font-size: .85rem;
+  color: var(--text-secondary);
+  font-weight: 300;
+  min-width: 3em;
+  text-align: right;
+}
+
+/* ── OTA progress ──────────────────────────────────────────────────── */
+
+#prog {
+  display: none; margin-top: 1.5rem; text-align: center;
+}
+#pct {
+  font-size: .85rem; color: var(--text-secondary); font-weight: 300;
+}
+.bar-bg {
+  height: 4px; background: var(--border);
+  border-radius: var(--radius); overflow: hidden; margin-top: .6rem;
+}
+.bar {
+  height: 100%; width: 0; background: var(--accent);
+  border-radius: var(--radius); transition: width .2s;
+}

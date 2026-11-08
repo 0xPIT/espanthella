@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>espANTHELLA — WiFi Setup</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="card">
+  <div class="logo"><svg xmlns="http://www.w3.org/2000/svg" width="36" height="40" viewBox="0 0 40 44" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="20" cy="3.5" r="1.5"/><path d="M5 21 A15 16 0 0 1 35 21Z"/><path d="M17 21C17 27 11 34 11 37"/><path d="M23 21C23 27 29 34 29 37"/><rect x="9" y="37" width="22" height="3" rx="1.5"/></svg></div>
+  <h2>espANTHELLA</h2>
+  <p class="sub">WiFi Setup</p>
+  <form action="/save" method="POST">
+    <label for="ssid">Network</label>
+    <select name="ssid" id="ssid">%NETWORKS%</select>
+    <p class="divider">&mdash; or enter manually &mdash;</p>
+    <label for="manual_ssid">SSID</label>
+    <input type="text" name="manual_ssid" id="manual_ssid"
+           placeholder="Leave empty to use selection above">
+    <label for="password">Password</label>
+    <input type="password" name="password" id="password"
+           placeholder="WiFi password">
+    <button type="submit">Connect</button>
+  </form>
+  <div class="foot">
+    <a class="btn btn-outline" href="/scan">Re-scan Networks</a>
+    <span class="ip">192.168.4.1</span>
+  </div>
+</div>
+</body>
+</html>

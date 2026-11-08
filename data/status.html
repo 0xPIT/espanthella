@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>espANTHELLA — Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body class="top">
+<div class="wrap">
+  <div class="header">
+    <svg xmlns="http://www.w3.org/2000/svg" width="36" height="40" viewBox="0 0 40 44" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="20" cy="3.5" r="1.5"/><path d="M5 21 A15 16 0 0 1 35 21Z"/><path d="M17 21C17 27 11 34 11 37"/><path d="M23 21C23 27 29 34 29 37"/><rect x="9" y="37" width="22" height="3" rx="1.5"/></svg>
+    <h1>espANTHELLA</h1>
+  </div>
+
+  <div class="section">
+    <h3>WiFi</h3>
+    <div class="row"><span class="lbl">SSID</span><span class="val">%WIFI_SSID%</span></div>
+    <div class="row"><span class="lbl">IP Address</span><span class="val">%WIFI_IP%</span></div>
+    <div class="row"><span class="lbl">Signal</span><span class="val">%WIFI_RSSI% dBm</span></div>
+    <div class="row"><span class="lbl">MAC</span><span class="val">%WIFI_MAC%</span></div>
+  </div>
+
+  <div class="section">
+    <h3>Light</h3>
+    <div class="row"><span class="lbl">Status</span><span class="val">%MATTER_STATUS%</span></div>
+    <div class="row">
+      <span class="lbl">On / Off</span>
+      <label class="toggle">
+        <input type="checkbox" id="sw" %LIGHT_CHECKED%>
+        <span class="track"></span>
+      </label>
+    </div>
+    <div class="row">
+      <span class="lbl">Brightness</span>
+      <div class="brightness" id="bri-wrap">
+        <input type="range" id="bri" min="0" max="255" value="%BRIGHTNESS_RAW%">
+        <span class="pct" id="bri-pct">%BRIGHTNESS%</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="pair" style="%PAIR_DISPLAY%">
+    <h3>Pair this device</h3>
+    <div class="pair">
+      <div id="qr"></div>
+      <div class="code">%PAIRING_CODE%</div>
+      <p class="hint">Scan the QR code or manually enter this code<br>in your Matter controller app (Apple, Google, Ikea, etc.)</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>System</h3>
+    <div class="row"><span class="lbl">Hostname</span><span class="val">%HOSTNAME%</span></div>
+    <div class="row"><span class="lbl">Uptime</span><span class="val">%UPTIME%</span></div>
+    <div class="row"><span class="lbl">Free Heap</span><span class="val">%FREE_HEAP% KB</span></div>
+    <div class="row"><span class="lbl">Chip</span><span class="val">%CHIP_MODEL%</span></div>
+    <div class="row"><span class="lbl">Flash</span><span class="val">%FLASH_SIZE% MB</span></div>
+  </div>
+
+  <div class="section">
+    <h3>Actions</h3>
+    <div class="actions">
+      <button class="btn btn-primary" onclick="document.getElementById('confirm-matter').classList.toggle('show')">
+        Reset Matter Provisioning
+      </button>
+      <div class="confirm" id="confirm-matter">
+        <p>This will decommission the device from its current Matter controller.
+           You will need to re-pair it.</p>
+        <div class="row-btns">
+          <a class="btn btn-danger" href="/reset-matter">Yes, decommission</a>
+          <button class="btn btn-outline"
+                  onclick="document.getElementById('confirm-matter').classList.remove('show')">Cancel</button>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" onclick="document.getElementById('confirm-wifi').classList.toggle('show')">
+        Reset WiFi Credentials
+      </button>
+      <div class="confirm" id="confirm-wifi">
+        <p>This will erase the stored WiFi credentials and reboot into
+           setup AP mode.</p>
+        <div class="row-btns">
+          <a class="btn btn-danger" href="/reset-wifi">Yes, reset WiFi</a>
+          <button class="btn btn-outline"
+                  onclick="document.getElementById('confirm-wifi').classList.remove('show')">Cancel</button>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" onclick="document.getElementById('confirm-factory').classList.toggle('show')">
+        Factory Reset
+      </button>
+      <div class="confirm" id="confirm-factory">
+        <p>This will erase <strong>both</strong> Matter provisioning and WiFi
+           credentials, then reboot into setup mode.</p>
+        <div class="row-btns">
+          <a class="btn btn-danger" href="/factory-reset">Yes, factory reset</a>
+          <button class="btn btn-outline"
+                  onclick="document.getElementById('confirm-factory').classList.remove('show')">Cancel</button>
+        </div>
+      </div>
+
+      <a class="btn btn-outline" href="/reboot">Reboot Device</a>
+      <a class="btn btn-outline" href="/update">Firmware Update</a>
+    </div>
+  </div>
+</div>
+<script src="/qrcode.min.js"></script>
+<script>
+(function(){
+  var s=document.getElementById('pair');
+  if(!s||s.style.display==='none')return;
+  var payload='%QR_PAYLOAD%';
+  if(!payload)return;
+  new QRCode(document.getElementById('qr'),{text:payload,width:180,height:180,colorDark:'#1A1A1A',colorLight:'#ffffff',correctLevel:QRCode.CorrectLevel.M});
+})();
+</script>
+<script>
+(function(){
+  var sw   = document.getElementById('sw');
+  var bri  = document.getElementById('bri');
+  var pct  = document.getElementById('bri-pct');
+  var wrap = document.getElementById('bri-wrap');
+  var busy = false, hold = null;
+
+  function markBusy() {
+    busy = true;
+    clearTimeout(hold);
+    hold = setTimeout(function(){ busy = false; }, 2000);
+  }
+
+  function fmtPct(v) { return Math.round(v * 100 / 255) + '%'; }
+
+  function applyUI(s) {
+    sw.checked = s.on;
+    bri.value = s.brightness;
+    pct.textContent = s.on ? fmtPct(s.brightness) : 'OFF';
+    wrap.classList.toggle('off', !s.on);
+  }
+
+  function send(on, brightness) {
+    markBusy();
+    fetch('/api/light', {
+      method: 'POST',
+      headers: {'Content-Type':'application/x-www-form-urlencoded'},
+      body: 'on=' + (on?1:0) + '&brightness=' + brightness
+    }).then(function(r){ return r.json(); }).then(applyUI).catch(function(){});
+  }
+
+  /* toggle switch */
+  sw.addEventListener('change', function(){
+    var b = parseInt(bri.value);
+    if (this.checked && b === 0) b = 128;
+    send(this.checked, b);
+  });
+
+  /* brightness slider — throttled POST, instant visual feedback */
+  var briT = null;
+  bri.addEventListener('input', function(){
+    var v = parseInt(this.value);
+    pct.textContent = v > 0 ? fmtPct(v) : 'OFF';
+    wrap.classList.toggle('off', v === 0);
+    sw.checked = v > 0;
+    clearTimeout(briT);
+    briT = setTimeout(function(){ send(v > 0, v); }, 150);
+  });
+
+  /* poll for external changes (Matter controller, touch sensor, etc.) */
+  setInterval(function(){
+    if (busy) return;
+    fetch('/api/light').then(function(r){ return r.json(); }).then(applyUI).catch(function(){});
+  }, 3000);
+
+  /* set initial visual state */
+  wrap.classList.toggle('off', !sw.checked);
+  if (!sw.checked) pct.textContent = 'OFF';
+})();
+</script>
+</body>
+</html>
