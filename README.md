@@ -161,7 +161,9 @@ Native-touch targets use the separate `SOC_TOUCH_SENSOR_SUPPORTED` path. Their t
 
 The dashboard follows the lamp's understated character: a small line-drawn lamp icon, warm brass accents, and simple sections. The README reuses that SVG icon; GitHub supplies its own typography and colors, so the dashboard's CSS is not embedded here.
 
-![Top view of the Panthella PCB](doc/images/status_screenshot.png)
+<p align="center">
+  <img src="doc/images/status_screenshot.png" alt="espANTHELLA web dashboard" width="400">
+</p>
 
 | Section | What it provides |
 | --- | --- |
