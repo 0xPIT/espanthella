@@ -135,11 +135,18 @@ GPIO4 and GPIO9 have boot-strapping functions on the C6. External circuits must 
 - If you use a cheap ESP32-C6 super micro board, remove the charhing LED *and* the RGB LED (it consumes power even when off) and the battery charger chip. This works nicely with solder pliers or hot air.
 - On the *Panthella PCB*, unsolder the microcontroller (U4). Use hot air at 450°C and flux, it will take ~3-5 sec.
 ##### Connections
-- Use 4 thin wires, about 5cm, described from Panthella to ESP32-C6:
-  - Bottom Pad GND -> GND
-  - Bottom Pad +5V -> +5V
-  - Bottom, R23, right side (towards USB–C port) -> Pin 7
-  - Top, left pin (towards USB–C port) of the touch sensor connector -> Pin 4
+
+Use **four thin wires**, approximately **5 cm** long, to connect the Panthella PCB to the ESP32-C6 SuperMini:
+
+| Signal | Panthella PCB side | Panthella solder point | ESP32-C6 SuperMini connection |
+| --- | --- | --- | --- |
+| **Ground** | Bottom | Pad marked **GND** | **GND** |
+| **Power** | Bottom | Pad marked **+5V** | **5V** |
+| **PWM dimming** | Bottom | **R23**, right-hand pad (towards the USB-C port) | **GPIO7** (`PIN_PWM`) |
+| **Touch** | Top | Touch sensor connector, left-hand pin (towards the USB-C port) | **GPIO4** (`PIN_TOUCH`) |
+
+GPIO numbers match to the physical header positions and text on the ESP32-C6 PCB.
+
 ##### Mount
 - Using two ~ 5x5mm thick double sided adhesive tape, stick the ESP32-C6 PCB to the available pads
 
