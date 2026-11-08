@@ -13,6 +13,7 @@
   <a href="https://platformio.org/"><img src="https://img.shields.io/badge/PlatformIO-required-B8935A?style=flat-square" alt="Requires PlatformIO"></a>
   <img src="https://img.shields.io/badge/ESP32--C6-tested-B8935A?style=flat-square" alt="Tested on ESP32-C6">
   <a href="https://github.com/espressif/esp-matter"><img src="https://img.shields.io/badge/Matter-over_Wi--Fi-B8935A?style=flat-square" alt="Matter over Wi-Fi"></a>
+  <img src="https://img.shields.io/badge/Cloud--Free-100%25-B8935A?style=flat-square" alt="100% Cloud-Free">
 </p>
 
 <p align="center">
@@ -26,15 +27,15 @@
 
 ## The light
 
-**espANTHELLA** brings local smart-home control to a **Louis Poulsen Panthella 160 Portable** using an ESP32 and a suitable interface to the lamp's LED driver. It exposes a Matter dimmable light: switch it on, adjust the brightness, and include it in scenes and automations from your preferred Matter ecosystem.
+**espANTHELLA** brings local smart-home control to a **Louis Poulsen Panthella 160 Portable**, the most beautiful and classic lamp. It's using a cheap ESP32-C6 and reuses the lamp's LED driver. It exposes a Matter dimmable light: switch it on, adjust the brightness, and include it in scenes and automations from your preferred Matter ecosystem.
 
-Built with the Arduino-ESP32 Matter library on top of [Espressif's ESP-Matter](https://github.com/espressif/esp-matter), it combines smart-home integration with a small, self-contained web dashboard. No project-specific cloud service is required.
+Built with the Arduino-ESP32 Matter library on top of [Espressif's ESP-Matter](https://github.com/espressif/esp-matter), it combines smart-home integration with a small, self-contained web dashboard. **No cloud service is required**.
 
-- **Matter on/off and dimming** over Wi-Fi.
+- **Matter on/off and dimming** over Wi-Fi, works with Ikea, Alexa, Google, etc.
 - **Smooth light output** with a compile-time gamma curve, 10-bit PWM, and short hardware fades.
-- **Local controls** through the BOOT button and touch-handling code.
+- **Local controls** through touch-dimming in 3 levels.
 - **Browser control** with an on/off switch and brightness slider, synchronized with external changes.
-- **Wi-Fi setup portal**—no network credentials compiled into the firmware.
+- **Wi-Fi setup portal** no network credentials compiled into the firmware.
 - **Persistent state** for the last on/off setting and brightness.
 - **Maintenance tools** for pairing, resets, and firmware uploads.
 
@@ -134,6 +135,7 @@ GPIO4 and GPIO9 have boot-strapping functions on the C6. External circuits must 
 ##### Modification
 - If you use a cheap ESP32-C6 super micro board, remove the charhing LED *and* the RGB LED (it consumes power even when off) and the battery charger chip. This works nicely with solder pliers or hot air.
 - On the *Panthella PCB*, unsolder the microcontroller (U4). Use hot air at 450°C and flux, it will take ~3-5 sec.
+
 ##### Connections
 
 Use **four thin wires**, approximately **5 cm** long, to connect the Panthella PCB to the ESP32-C6 SuperMini:
