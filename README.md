@@ -149,7 +149,7 @@ GPIO4 and GPIO9 have boot-strapping functions on the C6. External circuits must 
 | :---: | :---: |
 | ![Top view of the Panthella PCB](doc/images/overview_pcb_top.jpeg) | ![Bottom view of the Panthella PCB](doc/images/pcb_bottom.jpeg) |
 
-### Touch sensing on the C6
+### Touch sensing on the ESP32-C6
 
 The ESP32-C6 has **no native capacitive-touch peripheral**. The current fallback charges GPIO4, releases it to an input, and samples it with the ADC. It calibrates at startup and uses the measured value for brightness-step detection.
 
@@ -160,6 +160,8 @@ Native-touch targets use the separate `SOC_TOUCH_SENSOR_SUPPORTED` path. Their t
 ## Web dashboard
 
 The dashboard follows the lamp's understated character: a small line-drawn lamp icon, warm brass accents, and simple sections. The README reuses that SVG icon; GitHub supplies its own typography and colors, so the dashboard's CSS is not embedded here.
+
+![Top view of the Panthella PCB](doc/images/overview_pcb_top.jpeg)
 
 | Section | What it provides |
 | --- | --- |
@@ -251,7 +253,6 @@ This diagnostic target also requires a host C++ compiler available as `g++`. Exp
 | [data/](data/) | Locally served HTML, CSS, JavaScript, and SVG icon. |
 | [scripts/](scripts/) | Filesystem deployment, image packaging, and build diagnostics. |
 | [boards/](boards/) | Custom PlatformIO board definitions. |
-| [hardware/](hardware/) | KiCad hardware development files. |
 
 ---
 
