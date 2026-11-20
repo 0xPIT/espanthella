@@ -144,6 +144,21 @@ async function main() {
     assert.equal(d.elements.get('sw').checked, false);
     assert.equal(d.elements.get('temp-value').textContent, '5000 K');
   }
+  // An on/off click changes only OnOff, never a stale cached brightness.
+  {
+    const d = dashboard();
+    d.poll();
+    await respond(d.requests[0], state({on: true, brightness: 200}));
+    d.input('sw', false, 'change');
+    d.advance(150);
+    assert.deepEqual(params(d.requests[1]), {on: '0'});
+    await respond(d.requests[1], state({on: false, brightness: 240}));
+    d.input('sw', true, 'change');
+    d.advance(150);
+    assert.deepEqual(params(d.requests[2]), {on: '1'});
+    await respond(d.requests[2], state({on: true, brightness: 240}));
+    assert.equal(d.elements.get('bri').value, 240);
+  }
   // Merge changes made within the debounce window.
   {
     const d = dashboard();

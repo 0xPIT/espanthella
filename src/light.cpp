@@ -35,29 +35,33 @@ static MatterDimmableLight matterLight;
 static Preferences matterPref;
 static bool lightReady = false;
 static bool prefsEnabled = false;
-static LightState savedState;
+struct SavedLightSettings {
+  uint8_t brightness;
+  uint16_t temperature;
+};
+static SavedLightSettings savedState;
 #if LIGHT_TUNABLE_WHITE
 static bool swapCwWw = false;
 #endif
 
-// The Matter callback can run on another task. Only publish a snapshot there;
-// loop() owns all PWM and Preferences calls, including deferred writes.
+// The Matter callback can run on another task. Publish state there; the main
+// loop applies PWM and saves every observed change to NVS without a time delay.
 static portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
-struct PendingLight {
-  LightState state;
-  uint32_t changedAt;
-};
-static PendingLight pendingLight = {{false, 15, LIGHT_DEFAULT_MIREDS}, 0};
+static LightState pendingLight = {false, 15, LIGHT_DEFAULT_MIREDS};
+// Matter may replay persisted attributes while its stack starts. Do not let
+// those callbacks replace the application snapshot until reconciliation ends.
+static bool matterStateSynchronized = false;
+static bool restoringMatterCache = false;
 
-static PendingLight readPendingLight() {
+static LightState readPendingLight() {
   portENTER_CRITICAL(&stateMux);
-  PendingLight pending = pendingLight;
+  const LightState state = pendingLight;
   portEXIT_CRITICAL(&stateMux);
-  return pending;
+  return state;
 }
 
 LightState getLightState() {
-  return readPendingLight().state;
+  return readPendingLight();
 }
 
 bool supportsColorTemperature() {
@@ -157,23 +161,18 @@ static bool queueLightState(bool on, uint8_t brightness, uint16_t temperature) {
     return false;
   }
   const LightState state = {on, brightnessFromMatter(brightness), temperature};
-  const uint32_t now = millis();
   portENTER_CRITICAL(&stateMux);
-  if (   pendingLight.state.on != state.on
-      || pendingLight.state.brightness != state.brightness
-      || pendingLight.state.temperature != state.temperature)
-  {
-    pendingLight = {state, now};
-  }
+  const bool accepted = matterStateSynchronized || restoringMatterCache;
+  if (matterStateSynchronized) pendingLight = state;
   portEXIT_CRITICAL(&stateMux);
-  return true;
+  // Reject real controller writes before the saved state is published, but
+  // allow our own cache setters during reconciliation without driving PWM.
+  return accepted;
 }
 
 static void saveLightState(const LightState &state) {
   if (!prefsEnabled) return;
-  if (state.on != savedState.on && matterPref.putBool(PREF_ONOFF, state.on)) {
-    savedState.on = state.on;
-  }
+  // On/off is runtime-only. Persist brightness and temperature even while off.
   if (state.brightness != savedState.brightness && matterPref.putUChar(PREF_BRIGHTNESS, state.brightness)) {
     savedState.brightness = state.brightness;
   }
@@ -190,8 +189,7 @@ void flushLightPrefs() {
 
 void handleLight() {
   if (!lightReady) return;
-  const PendingLight pending = readPendingLight();
-  const LightState &state = pending.state;
+  const LightState state = readPendingLight();
   const uint16_t totalDuty = state.on ? GAMMA_LUT[state.brightness] : 0;
   const LightDuties duties = mixLightDuty(totalDuty, state.temperature,
                                         LIGHT_COOL_MIREDS, LIGHT_WARM_MIREDS,
@@ -211,24 +209,24 @@ void handleLight() {
     lastRgb = rgb;
   }
 #endif
-  if (millis() - pending.changedAt >= LIGHT_SAVE_DELAY_MS) {
-    saveLightState(state);
-  }
+  // Startup callbacks are ignored until Matter and our saved state agree.
+  // Each later changed key is written once; failed writes are retried.
+  if (matterStateSynchronized) saveLightState(state);
 }
 
 bool setLightOnOff(bool on) {
-  return lightReady && matterLight.setOnOff(on);
+  return lightReady && matterStateSynchronized && matterLight.setOnOff(on);
 }
 
 bool setLightBrightness(uint8_t brightness) {
-  if (!lightReady) return false;
+  if (!lightReady || !matterStateSynchronized) return false;
   if (brightness == 0) return setLightOnOff(false);
   return matterLight.setBrightness(brightnessToMatter(brightness));
 }
 
 bool setLightTemperature([[maybe_unused]] uint16_t mireds) {
 #if LIGHT_TUNABLE_WHITE
-  return lightReady && matterLight.setColorTemperature(
+  return lightReady && matterStateSynchronized && matterLight.setColorTemperature(
     clampLightTemperature(mireds, LIGHT_COOL_MIREDS, LIGHT_WARM_MIREDS));
 #else
   return false;
@@ -239,10 +237,135 @@ bool toggleLight() {
   return setLightOnOff(!getLightState().on);
 }
 
-void refreshLightState() {
+void restoreLightOutput() {
   if (!lightReady) return;
-  matterLight.updateAccessory();
+  const uint8_t brightness = brightnessFromMatter(brightnessToMatter(savedState.brightness));
+#if LIGHT_TUNABLE_WHITE
+  const uint16_t temperature = clampLightTemperature(savedState.temperature,
+                                                     LIGHT_COOL_MIREDS, LIGHT_WARM_MIREDS);
+#else
+  const uint16_t temperature = LIGHT_DEFAULT_MIREDS;
+#endif
+  portENTER_CRITICAL(&stateMux);
+  pendingLight = {true, brightness, temperature};
+  portEXIT_CRITICAL(&stateMux);
   handleLight();
+}
+
+// report() changes Matter's database and marks it dirty without invoking the
+// application callback. It never changes the Arduino endpoint's cached fields.
+static bool reportMatterAttributes(const LightState &state) {
+  using namespace chip::app::Clusters;
+  esp_matter_attr_val_t onValue = esp_matter_bool(state.on);
+  esp_matter_attr_val_t levelValue = esp_matter_nullable_uint8(brightnessToMatter(state.brightness));
+  bool ok = esp_matter::attribute::report(matterLight.getEndPointId(), OnOff::Id,
+                                          OnOff::Attributes::OnOff::Id, &onValue) == ESP_OK;
+  ok = (esp_matter::attribute::report(matterLight.getEndPointId(), LevelControl::Id,
+                                      LevelControl::Attributes::CurrentLevel::Id, &levelValue) == ESP_OK) && ok;
+#if LIGHT_TUNABLE_WHITE
+  esp_matter_attr_val_t temperatureValue = esp_matter_uint16(state.temperature);
+  ok = (esp_matter::attribute::report(matterLight.getEndPointId(), ColorControl::Id,
+                                      ColorControl::Attributes::ColorTemperatureMireds::Id,
+                                      &temperatureValue) == ESP_OK) && ok;
+#endif
+  return ok;
+}
+
+// Matter may restore older attributes during startup. Once the server is ready,
+// use the saved application state as the single source of truth for both its
+// database and the Arduino endpoint cache.
+bool refreshLightState() {
+  if (!lightReady) return false;
+  if (matterStateSynchronized) return true;  // Never replay boot state over a later command.
+  static bool warned = false;
+  using namespace chip::app::Clusters;
+  const bool on = true;  // Power-on policy; OnOff is never read from app NVS.
+  const uint8_t level = brightnessToMatter(savedState.brightness);
+#if LIGHT_TUNABLE_WHITE
+  const uint16_t temperature = clampLightTemperature(savedState.temperature,
+                                                     LIGHT_COOL_MIREDS, LIGHT_WARM_MIREDS);
+#endif
+  const LightState restored = {on, brightnessFromMatter(level),
+#if LIGHT_TUNABLE_WHITE
+                               temperature
+#else
+                               LIGHT_DEFAULT_MIREDS
+#endif
+  };
+  if (!reportMatterAttributes(restored)) {
+    if (!warned) Serial.printf("Light: could not publish saved Matter state; retrying\n");
+    warned = true;
+    return false;
+  }
+  // If Matter's startup callbacks changed the endpoint cache, its setters now
+  // see the desired database values and update the cache without driving PWM.
+  portENTER_CRITICAL(&stateMux);
+  restoringMatterCache = true;
+  portEXIT_CRITICAL(&stateMux);
+  bool cacheOk = true;
+  if (matterLight.getOnOff() != on) cacheOk = matterLight.setOnOff(on) && cacheOk;
+  if (matterLight.getBrightness() != level) cacheOk = matterLight.setBrightness(level) && cacheOk;
+#if LIGHT_TUNABLE_WHITE
+  if (matterLight.getColorTemperature() != temperature) {
+    cacheOk = matterLight.setColorTemperature(temperature) && cacheOk;
+  }
+#endif
+  portENTER_CRITICAL(&stateMux);
+  restoringMatterCache = false;
+  portEXIT_CRITICAL(&stateMux);
+  if (!cacheOk) {
+    if (!warned) Serial.printf("Light: could not align Matter endpoint cache; retrying\n");
+    warned = true;
+    return false;
+  }
+  // A successful report() call alone does not prove Matter exposes the right
+  // values. Check the attributes that a controller will read before accepting
+  // any callbacks or persisting a new state.
+  esp_matter_attr_val_t reported = esp_matter_invalid(nullptr);
+  bool matches = matterLight.getAttributeVal(OnOff::Id, OnOff::Attributes::OnOff::Id, &reported) && reported.val.b == on;
+  matches = (matterLight.getAttributeVal(LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id, &reported) &&
+             reported.val.u8 == level) && matches;
+#if LIGHT_TUNABLE_WHITE
+  matches = (matterLight.getAttributeVal(ColorControl::Id, ColorControl::Attributes::ColorTemperatureMireds::Id, &reported) &&
+             reported.val.u16 == temperature) && matches;
+#endif
+  matches = (matterLight.getOnOff() == on && matterLight.getBrightness() == level) && matches;
+#if LIGHT_TUNABLE_WHITE
+  matches = (matterLight.getColorTemperature() == temperature) && matches;
+#endif
+  if (!matches) {
+    if (!warned) Serial.printf("Light: Matter readback does not match saved state; retrying\n");
+    warned = true;
+    return false;
+  }
+  warned = false;
+  portENTER_CRITICAL(&stateMux);
+  pendingLight = restored;
+  matterStateSynchronized = true;
+  portEXIT_CRITICAL(&stateMux);
+  handleLight();
+  Serial.printf("Light: Matter ready, endpoint=%u on=%u level=%u temperature=%u\n",
+                matterLight.getEndPointId(), on, level,
+#if LIGHT_TUNABLE_WHITE
+                temperature
+#else
+                LIGHT_DEFAULT_MIREDS
+#endif
+  );
+  return true;
+}
+
+bool reportLightState() {
+  if (!lightReady || !matterStateSynchronized) return false;
+  using namespace chip::app::Clusters;
+  const LightState state = readPendingLight();
+  if (!reportMatterAttributes(state)) {
+    Serial.printf("Light: could not report Matter state on connection\n");
+    return false;
+  }
+  Serial.printf("Light: reported Matter state on connection, endpoint=%u on=%u level=%u\n",
+                matterLight.getEndPointId(), state.on, brightnessToMatter(state.brightness));
+  return true;
 }
 
 // ── Touch sensor — brightness cycle ──────────────────────────────────
@@ -425,21 +548,20 @@ bool initLight() {
 
   if (!matterPref.begin(MATTER_PREF_NAMESPACE, false)) return false;
   prefsEnabled = true;
-  savedState = {matterPref.getBool(PREF_ONOFF, true),
-                matterPref.getUChar(PREF_BRIGHTNESS, 15),
+  const uint8_t storedBrightness = matterPref.getUChar(PREF_BRIGHTNESS, 15);
+  savedState = {storedBrightness == 0 ? LIGHT_ZERO_BRIGHTNESS_FALLBACK : storedBrightness,
                 matterPref.getUShort(PREF_TEMPERATURE, LIGHT_DEFAULT_MIREDS)};
 #if LIGHT_TUNABLE_WHITE
   swapCwWw = matterPref.getBool(PREF_SWAP_CW_WW, false);
 #endif
-  const bool on = savedState.on && savedState.brightness != 0;
-  const uint8_t brightness = brightnessToMatter(savedState.brightness ? savedState.brightness : 15);
+  const uint8_t brightness = brightnessToMatter(savedState.brightness);
 #if LIGHT_TUNABLE_WHITE
   const uint16_t temperature = clampLightTemperature(savedState.temperature,
                                                     LIGHT_COOL_MIREDS, LIGHT_WARM_MIREDS);
-  if (!matterLight.begin(on, brightness, temperature) || !configureTemperatureRange()) return false;
+  if (!matterLight.begin(true, brightness, temperature) || !configureTemperatureRange()) return false;
   matterLight.onChange(queueLightState);
 #else
-  if (!matterLight.begin(on, brightness)) return false;
+  if (!matterLight.begin(true, brightness)) return false;
   matterLight.onChange([](bool on, uint8_t brightness) {
     return queueLightState(on, brightness, LIGHT_DEFAULT_MIREDS);
   });

@@ -37,7 +37,7 @@ Built with the Arduino-ESP32 Matter library on top of [Espressif's ESP-Matter](h
 - **Browser control** with an on/off switch and brightness slider, synchronized with external changes.
 - **Wi-Fi setup portal** no network credentials compiled into the firmware.
 - **Optional WW/CW tunable white** using two PWM outputs and a Matter color-temperature light endpoint; the default single-channel build remains a dimmable light.
-- **Persistent state** for the last on/off setting, brightness, and (on WW/CW builds) color temperature.
+- **Persistent brightness and color temperature** (on WW/CW builds); the light always powers up on, regardless of its previous on/off state.
 - **Maintenance tools** for pairing, resets, and firmware uploads.
 
 > [!IMPORTANT]
@@ -308,8 +308,8 @@ operation and controller interoperability still need testing on the actual lamp.
 Keep the selected hardware mode stable once commissioned. If an existing device
 is changed from single-channel to WW/CW (or back), remove it from the Matter
 controller, reset Matter provisioning, and pair it again; controllers may cache
-the endpoint type and capabilities. The existing on/off and brightness preference
-keys are preserved across firmware upgrades.
+the endpoint type and capabilities. The existing brightness preference remains
+compatible; any old on/off preference is ignored and never written again.
 
 ### Seeed Studio XIAO ESP32C6 WW/CW build
 
@@ -370,10 +370,22 @@ valid CurrentLevel range 1–254. The temperature capability flag is authoritati
 temperature fields are not adjustable on a single-channel build. Invalid requests
 return HTTP 400 before applying any fields.
 
-State is saved after one second without a change, writing only changed preference
-keys. Intentional web reboots/updates flush pending state; an abrupt power loss
-within that one-second window can lose the most recent adjustment. Factory reset
-cancels pending saves so cleared preferences are not recreated.
+The lamp **always powers up on** with the last stored brightness and, on WW/CW
+builds, color temperature. If stored brightness is zero, it starts at **20%**
+(51/255). On/off remains controllable via Matter, web, and local button while
+running, but is never read from or written to application preferences. Output
+is restored before WiFi provisioning, including when the setup portal blocks
+startup. Before Matter server-ready, callbacks cannot change the lamp and
+premature controller writes are rejected. Once ready, the on state and restored
+brightness/temperature are published to Matter and its endpoint cache is aligned.
+Failed publication is retried while the output remains stable. A secure-session
+event re-reports current values without replaying boot state. Brightness and
+temperature changes are saved from the main loop on its next pass, writing only
+changed keys; failed writes are retried. Matter callbacks do not write flash.
+Intentional web reboots/updates also flush state. Power loss before the next loop pass or during
+an NVS write can still lose the latest adjustment. Frequent dimming changes
+increase flash wear compared with the former one-second debounce. Factory reset
+prevents cleared preferences from being repopulated.
 
 ### Dimming configuration
 
@@ -411,7 +423,7 @@ node test/dashboard.test.cjs
 The C++ suite requires Python 3.8+ and a C++20 compiler. It compiles the actual
 light module in both hardware modes against small Arduino/Matter/LEDC test
 stubs, and checks mixing, brightness conversion, callback queuing, restored state,
-deferred persistence, resets, driver errors, and configuration guards. These are
+immediate change persistence, resets, driver errors, and configuration guards. These are
 logic tests, not a substitute for the real Matter stack and LED-driver hardware.
 The suites also check URL-decoding and validation of Matter QR payloads, dashed
 manual setup codes (including leading zeroes), and QR-renderer error handling.
@@ -424,7 +436,7 @@ off-state temperature changes, and serialized requests/stale-response protection
 
 | Location | Contents |
 | --- | --- |
-| [src/light.cpp](src/light.cpp) | Private Matter endpoint, shared light state, gamma table, LEDC outputs, deferred persistence, and touch handling. |
+| [src/light.cpp](src/light.cpp) | Private Matter endpoint, shared light state, gamma table, LEDC outputs, immediate main-loop persistence, and touch handling. |
 | [include/light.h](include/light.h) | Hardware-independent API used by the button, touch, and web controls. |
 | [include/light_math.h](include/light_math.h) | Host-testable brightness conversion and constant-sum WW/CW mixing. |
 | [src/antenna.cpp](src/antenna.cpp) | XIAO ESP32C6 RF-switch configuration and saved antenna selection. |

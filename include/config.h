@@ -124,8 +124,8 @@ constexpr const char* WIFI_PREF_NAMESPACE    = "WiFiCreds";
 
 // ── Matter persistence ───────────────────────────────────────────────
 constexpr const char* MATTER_PREF_NAMESPACE = "MatterPrefs";
-constexpr const char* PREF_ONOFF            = "OnOff";
+// A legacy OnOff preference may remain in NVS, but is no longer read or written.
+constexpr uint8_t LIGHT_ZERO_BRIGHTNESS_FALLBACK = 51;  // 20% of 255
 constexpr const char* PREF_BRIGHTNESS       = "Brightness";
 constexpr const char* PREF_TEMPERATURE      = "Temperature";  // mireds
 constexpr const char* PREF_SWAP_CW_WW       = "SwapCwWw";    // tunable-white output wiring
-constexpr uint32_t LIGHT_SAVE_DELAY_MS      = 1000;

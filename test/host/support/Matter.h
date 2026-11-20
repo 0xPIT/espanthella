@@ -1,5 +1,6 @@
 #pragma once
 #include "host_runtime.h"
+#include "esp_err.h"
 #include <algorithm>
 #include <functional>
 
@@ -11,12 +12,29 @@
 namespace chip::app::Clusters::ColorControl {
 constexpr uint32_t Id = 0x0300;
 namespace Attributes {
+namespace ColorTemperatureMireds { constexpr uint32_t Id = 0x0007; }
 namespace ColorTempPhysicalMinMireds { constexpr uint32_t Id = 0x400b; }
 namespace ColorTempPhysicalMaxMireds { constexpr uint32_t Id = 0x400c; }
 namespace CoupleColorTempToLevelMinMireds { constexpr uint32_t Id = 0x400d; }
 }  // namespace Attributes
 }  // namespace chip::app::Clusters::ColorControl
-struct esp_matter_attr_val_t { union { uint16_t u16; } val; };
+namespace chip::app::Clusters::OnOff {
+constexpr uint32_t Id = 0x0006;
+namespace Attributes { namespace OnOff { constexpr uint32_t Id = 0x0000; } }
+}
+namespace chip::app::Clusters::LevelControl {
+constexpr uint32_t Id = 0x0008;
+namespace Attributes { namespace CurrentLevel { constexpr uint32_t Id = 0x0000; } }
+}
+struct esp_matter_attr_val_t { union { uint32_t u32; uint16_t u16; uint8_t u8; bool b; } val; };
+namespace esp_matter::attribute {
+inline unsigned reports = 0;
+inline bool failNextReport = false;
+inline esp_err_t report(uint16_t, uint32_t, uint32_t, esp_matter_attr_val_t *);
+}
+inline esp_matter_attr_val_t esp_matter_invalid(void *) { return {{0}}; }
+inline esp_matter_attr_val_t esp_matter_bool(bool value) { return {{uint32_t(value)}}; }
+inline esp_matter_attr_val_t esp_matter_nullable_uint8(uint8_t value) { return {{value}}; }
 inline esp_matter_attr_val_t esp_matter_uint16(uint16_t value) { return {{value}}; }
 
 namespace host {
@@ -36,6 +54,9 @@ class Endpoint {
   unsigned attributeCalls = 0;
   unsigned updateCalls = 0;
   std::map<std::pair<uint32_t, uint32_t>, uint16_t> attributes;
+  std::map<std::pair<uint32_t, uint32_t>, uint32_t> reported;
+  unsigned reportedUpdates = 0;
+  bool failNextAttributeRead = false;
   std::function<bool(bool, uint8_t, uint16_t)> callback;
 
   explicit Endpoint(bool supportsTemperature) : tunable(supportsTemperature) { endpoint = this; }
@@ -45,6 +66,10 @@ class Endpoint {
     on = initialOn;
     level = std::clamp<unsigned>(initialLevel, 1, 254);
     temperature = std::clamp<unsigned>(initialTemperature, 100, 500);
+    using namespace chip::app::Clusters;
+    reported[{OnOff::Id, OnOff::Attributes::OnOff::Id}] = on;
+    reported[{LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id}] = level;
+    if (tunable) reported[{ColorControl::Id, ColorControl::Attributes::ColorTemperatureMireds::Id}] = temperature;
     return started;
   }
   bool notify(bool nextOn, uint8_t nextLevel, uint16_t nextTemperature) {
@@ -60,6 +85,10 @@ class Endpoint {
     on = nextOn;
     level = nextLevel;
     temperature = nextTemperature;
+    using namespace chip::app::Clusters;
+    reported[{OnOff::Id, OnOff::Attributes::OnOff::Id}] = on;
+    reported[{LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id}] = level;
+    if (tunable) reported[{ColorControl::Id, ColorControl::Attributes::ColorTemperatureMireds::Id}] = temperature;
     return true;
   }
   bool setOnOff(bool value) {
@@ -80,6 +109,30 @@ class Endpoint {
     ++updateCalls;
     notify(on, level, temperature);
   }
+  uint16_t getEndPointId() const { return 1; }
+  bool getOnOff() const { return on; }
+  uint8_t getBrightness() const { return level; }
+  uint16_t getColorTemperature() const { return temperature; }
+  bool getAttributeVal(uint32_t cluster, uint32_t attribute, esp_matter_attr_val_t *value) {
+    if (failNextAttributeRead) { failNextAttributeRead = false; return false; }
+    const auto it = reported.find({cluster, attribute});
+    if (it == reported.end()) return false;
+    value->val.u32 = it->second;
+    return true;
+  }
+  bool updateAttributeVal(uint32_t cluster, uint32_t attribute, esp_matter_attr_val_t *value) {
+    ++reportedUpdates;
+    reported[{cluster, attribute}] = value->val.u32;
+    // ESP-Matter's PRE_UPDATE callback also updates the endpoint cache.
+    using namespace chip::app::Clusters;
+    if (cluster == OnOff::Id) on = value->val.b;
+    if (cluster == LevelControl::Id) level = value->val.u8;
+    if (cluster == ColorControl::Id && attribute == ColorControl::Attributes::ColorTemperatureMireds::Id) {
+      temperature = value->val.u16;
+    }
+    notify(on, level, temperature);
+    return true;
+  }
   bool setAttributeVal(uint32_t cluster, uint32_t attribute, esp_matter_attr_val_t *value) {
     ++attributeCalls;
     if (attributeCalls == failAttributeCall) return false;
@@ -88,6 +141,17 @@ class Endpoint {
   }
 };
 }  // namespace host
+
+namespace esp_matter::attribute {
+inline esp_err_t report(uint16_t, uint32_t cluster, uint32_t attribute, esp_matter_attr_val_t *value) {
+  host::record("matter.report");
+  if (failNextReport) { failNextReport = false; return ESP_FAIL; }
+  if (!host::endpoint || !host::endpoint->started) return ESP_FAIL;
+  ++reports;
+  host::endpoint->reported[{cluster, attribute}] = value->val.u32;
+  return ESP_OK;
+}
+}
 
 class MatterDimmableLight : public host::Endpoint {
  public:

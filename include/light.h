@@ -8,8 +8,10 @@ struct LightState {
 };
 
 bool initLight();           // Creates the endpoint before Matter.begin().
-void refreshLightState();   // Applies the endpoint's initial state after Matter.begin().
-void handleLight();         // Services PWM and deferred persistence from loop().
+void restoreLightOutput();  // Applies saved output before WiFi provisioning can block.
+bool refreshLightState();   // Align cache and report saved state after MATTER_SERVER_READY; retry on failure.
+bool reportLightState();     // Re-report current state when a Matter session connects.
+void handleLight();         // Services PWM and persists changed state from loop().
 LightState getLightState();
 bool supportsColorTemperature();
 bool isCwWwSwapped();

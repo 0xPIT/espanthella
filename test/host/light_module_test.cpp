@@ -16,6 +16,7 @@
 namespace {
 constexpr bool tunable = LIGHT_TUNABLE_WHITE;
 constexpr unsigned channelCount = tunable ? 2 : 1;
+constexpr const char *LEGACY_ONOFF = "OnOff"; // Historical NVS key: never read or written.
 
 unsigned matterLevel(unsigned publicLevel) {
   return std::max(1L, std::lround(publicLevel * (254.0 / 255.0)));
@@ -31,13 +32,21 @@ void checkState(bool on, unsigned brightness, unsigned temperature) {
   CHECK_EQ(host::criticalDepth, 0);
 }
 void seed(bool on, unsigned brightness, unsigned temperature = LIGHT_DEFAULT_MIREDS) {
-  host::prefs = {{PREF_ONOFF, on}, {PREF_BRIGHTNESS, brightness}, {PREF_TEMPERATURE, temperature}};
+  host::prefs = {{LEGACY_ONOFF, on}, {PREF_BRIGHTNESS, brightness}, {PREF_TEMPERATURE, temperature}};
 }
-void boot(bool on = true, unsigned brightness = 15, unsigned temperature = LIGHT_DEFAULT_MIREDS) {
-  seed(on, brightness, temperature);
+void checkNoOnOffPersistence() {
+  CHECK(std::find(host::reads.begin(), host::reads.end(), LEGACY_ONOFF) == host::reads.end());
+  CHECK(std::none_of(host::writes.begin(), host::writes.end(), [](const auto &write) {
+    return write.key == LEGACY_ONOFF;
+  }));
+}
+void boot(bool legacyOn = true, unsigned brightness = 15, unsigned temperature = LIGHT_DEFAULT_MIREDS) {
+  seed(legacyOn, brightness, temperature);
   CHECK(initLight());
-  refreshLightState();
+  restoreLightOutput();
+  CHECK(refreshLightState());
   flushLightPrefs();
+  checkNoOnOffPersistence();
   host::clearObservations();
 }
 uint32_t duty(int channel) {
@@ -84,6 +93,8 @@ void beforeInit() {
   refreshLightState();
   flushLightPrefs();
   CHECK(host::io.empty());
+  restoreLightOutput();
+  CHECK(host::io.empty());
   CHECK(getLightState().brightness >= 1);
 }
 
@@ -98,7 +109,7 @@ void initialization() {
   CHECK_EQ(host::endpoint->level, matterLevel(15));
   CHECK(host::prefNamespace == MATTER_PREF_NAMESPACE);
   CHECK(!host::prefsReadOnly);
-  CHECK(std::find(host::reads.begin(), host::reads.end(), PREF_ONOFF) != host::reads.end());
+  checkNoOnOffPersistence();
   CHECK(std::find(host::reads.begin(), host::reads.end(), PREF_BRIGHTNESS) != host::reads.end());
   CHECK_EQ(host::timerCalls, 1);
   CHECK_EQ(host::timerFrequency, PWM_FREQ);
@@ -127,7 +138,7 @@ void initialization() {
   }
   host::clearObservations();
   refreshLightState();
-  CHECK_EQ(host::endpoint->updateCalls, 1);
+  CHECK_EQ(host::endpoint->updateCalls, 0); // Startup does not replay endpoint callbacks.
   checkState(true, publicLevel(matterLevel(15)), LIGHT_DEFAULT_MIREDS);
   checkOutput();
   CHECK_EQ(host::fades.size(), channelCount);
@@ -167,7 +178,8 @@ void queuedCallbacks() {
   handleLight();
   checkOutput();
   CHECK(!host::fades.empty());
-  CHECK(host::writes.empty());
+  CHECK_EQ(host::prefs.at(PREF_BRIGHTNESS), 255);
+  if (tunable) CHECK_EQ(host::prefs.at(PREF_TEMPERATURE), LIGHT_COOL_MIREDS);
   host::clearObservations();
   controller(false, 254, LIGHT_COOL_MIREDS);
   controller(true, 80, LIGHT_DEFAULT_MIREDS);
@@ -220,6 +232,9 @@ void brightnessAndFullScale() {
 
 void changesWhileOff() {
   boot(false, 75);
+  CHECK(setLightOnOff(false));  // Off is runtime-only, not restored from NVS.
+  handleLight();
+  host::clearObservations();
   CHECK(setLightBrightness(180));
   CHECK(host::io.empty());
   CHECK(!getLightState().on);
@@ -241,11 +256,8 @@ void changesWhileOff() {
   CHECK(host::io.empty());
   handleLight();
   checkOutput();
-  CHECK(host::writes.empty());
-  host::now += LIGHT_SAVE_DELAY_MS;
-  handleLight();
   CHECK_EQ(host::writes.size(), tunable ? 2 : 1);
-  for (const auto &write : host::writes) CHECK(write.key != PREF_ONOFF);
+  checkNoOnOffPersistence();
   CHECK(setLightOnOff(true));
   handleLight();
   checkOutput();
@@ -288,85 +300,233 @@ void changesWhileOff() {
   checkOutput();  // split after gamma, including low-brightness rounding
 }
 
-void restored(bool storedOn, unsigned storedBrightness, unsigned storedTemperature) {
-  seed(storedOn, storedBrightness, storedTemperature);
+void restored(bool legacyOn, unsigned storedBrightness, unsigned storedTemperature) {
+  seed(legacyOn, storedBrightness, storedTemperature);
   CHECK(initLight());
-  CHECK_EQ(host::endpoint->on, storedOn && storedBrightness != 0);
-  const unsigned expectedBrightness = publicLevel(matterLevel(storedBrightness ? storedBrightness : 15));
+  const unsigned startupBrightness = storedBrightness ? storedBrightness : LIGHT_ZERO_BRIGHTNESS_FALLBACK;
+  const unsigned expectedBrightness = publicLevel(matterLevel(startupBrightness));
   const unsigned expectedTemperature = tunable ? std::clamp<unsigned>(storedTemperature, LIGHT_COOL_MIREDS, LIGHT_WARM_MIREDS) : LIGHT_DEFAULT_MIREDS;
-  CHECK_EQ(host::endpoint->level, matterLevel(storedBrightness ? storedBrightness : 15));
+  CHECK(host::endpoint->on);
+  CHECK_EQ(host::endpoint->level, matterLevel(startupBrightness));
+  CHECK(host::fades.empty());
   CHECK(host::writes.empty());
-  refreshLightState();
-  checkState(storedOn && storedBrightness != 0, expectedBrightness, expectedTemperature);
+  // The old persisted OnOff value is deliberately ignored, even when false.
+  // The output is on before WiFi provisioning can block in the setup portal.
+  restoreLightOutput();
+  checkState(true, expectedBrightness, expectedTemperature);
   checkOutput();
-  CHECK(host::writes.empty());
-  host::now += LIGHT_SAVE_DELAY_MS;
-  handleLight();
-  CHECK_EQ(host::prefs.at(PREF_ONOFF), storedOn && storedBrightness != 0);
-  CHECK_EQ(host::prefs.at(PREF_BRIGHTNESS), expectedBrightness);
+  CHECK_EQ(host::prefs.at(LEGACY_ONOFF), legacyOn);
+  CHECK_EQ(host::prefs.at(PREF_BRIGHTNESS), storedBrightness);
+  if (tunable) CHECK_EQ(host::prefs.at(PREF_TEMPERATURE), storedTemperature);
+  checkNoOnOffPersistence();
+  CHECK(!setLightOnOff(false));  // Local controls cannot be lost during startup.
+  CHECK(!setLightBrightness(200));
+  if (tunable) CHECK(!setLightTemperature(LIGHT_COOL_MIREDS));
+  host::clearObservations();
+  CHECK(refreshLightState());
+  CHECK_EQ(host::prefs.at(LEGACY_ONOFF), legacyOn);
+  CHECK_EQ(host::prefs.at(PREF_BRIGHTNESS), storedBrightness == 0 ? 0 : expectedBrightness);
   if (tunable) CHECK_EQ(host::prefs.at(PREF_TEMPERATURE), expectedTemperature);
+  checkNoOnOffPersistence();
+  host::clearObservations();
+  CHECK(refreshLightState());
+  CHECK(host::io.empty());
 }
 
-void deferredPersistence() {
+void startupReadbackFailureRetries() {
+  seed(false, 175, LIGHT_COOL_MIREDS);
+  CHECK(initLight());
+  restoreLightOutput();
+  host::endpoint->failNextAttributeRead = true;
+  CHECK(!refreshLightState());
+  CHECK(getLightState().on);
+  CHECK_EQ(host::prefs.at(LEGACY_ONOFF), false);
+  CHECK(refreshLightState());
+  CHECK(getLightState().on);
+  using namespace chip::app::Clusters;
+  CHECK_EQ(host::endpoint->reported.at({OnOff::Id, OnOff::Attributes::OnOff::Id}), true);
+}
+
+void startupRetryKeepsBootOn() {
+  seed(false, 175, LIGHT_COOL_MIREDS);
+  CHECK(initLight());
+  restoreLightOutput();
+  using namespace chip::app::Clusters;
+  esp_matter::attribute::failNextReport = true;
+  CHECK(!refreshLightState());
+  host::clearObservations();
+  CHECK(!host::endpoint->controllerUpdate(true, 15, tunable ? LIGHT_WARM_MIREDS : LIGHT_DEFAULT_MIREDS));
+  handleLight();
+  checkState(true, publicLevel(matterLevel(175)), tunable ? LIGHT_COOL_MIREDS : LIGHT_DEFAULT_MIREDS);
+  checkOutput();
+  CHECK(host::fades.empty());
+  CHECK(host::writes.empty());
+  CHECK_EQ(host::prefs.at(LEGACY_ONOFF), false);
+  CHECK(refreshLightState());
+  CHECK_EQ(host::endpoint->reported.at({OnOff::Id, OnOff::Attributes::OnOff::Id}), true);
+  CHECK_EQ(host::prefs.at(LEGACY_ONOFF), false);
+  CHECK(setLightOnOff(false));
+  handleLight();
+  CHECK_EQ(host::prefs.at(LEGACY_ONOFF), false);
+  checkNoOnOffPersistence();
+}
+
+void startupCallbacksCannotOverwriteBootOn() {
+  seed(false, 175, LIGHT_COOL_MIREDS);
+  CHECK(initLight());
+  restoreLightOutput();
+  host::clearObservations();
+  // A startup restore notification arrives before Matter.begin() returns.
+  for (int i = 0; i < 5; ++i) {
+    CHECK(!host::endpoint->controllerUpdate(true, 15, tunable ? LIGHT_WARM_MIREDS : LIGHT_DEFAULT_MIREDS));
+    handleLight();  // Repeated early writes must not flash or persist.
+  }
+  checkState(true, publicLevel(matterLevel(175)), tunable ? LIGHT_COOL_MIREDS : LIGHT_DEFAULT_MIREDS);
+  checkOutput();
+  CHECK(host::fades.empty());
+  CHECK(host::writes.empty());
+  CHECK_EQ(host::prefs.at(LEGACY_ONOFF), false);
+  refreshLightState();
+  checkState(true, publicLevel(matterLevel(175)), tunable ? LIGHT_COOL_MIREDS : LIGHT_DEFAULT_MIREDS);
+  CHECK(setLightOnOff(false));
+  handleLight();
+  CHECK_EQ(host::prefs.at(LEGACY_ONOFF), false);
+  checkNoOnOffPersistence();
+}
+
+void restartWithStaleMatterAttributes(bool storedOn, bool cacheAlsoStale = false) {
+  seed(storedOn, 175, LIGHT_COOL_MIREDS);
+  CHECK(initLight());
+  restoreLightOutput();
+  using namespace chip::app::Clusters;
+  // Matter.begin() can restore older attributes after our NVS snapshot has
+  // already been applied to PWM. Sometimes its callback also changes the cache.
+  if (cacheAlsoStale) {
+    // Model a restored endpoint cache, not a controller write: real writes are
+    // rejected until saved state has been published to Matter.
+    host::endpoint->on = false;
+    host::endpoint->level = 15;
+    if (tunable) host::endpoint->temperature = LIGHT_WARM_MIREDS;
+    host::endpoint->reported[{OnOff::Id, OnOff::Attributes::OnOff::Id}] = false;
+    host::endpoint->reported[{LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id}] = 15;
+    if (tunable) host::endpoint->reported[{ColorControl::Id, ColorControl::Attributes::ColorTemperatureMireds::Id}] = LIGHT_WARM_MIREDS;
+    checkState(true, publicLevel(matterLevel(175)), tunable ? LIGHT_COOL_MIREDS : LIGHT_DEFAULT_MIREDS);
+    CHECK_EQ(host::prefs.at(LEGACY_ONOFF), storedOn);
+  } else {
+    host::endpoint->reported[{OnOff::Id, OnOff::Attributes::OnOff::Id}] = false;
+    host::endpoint->reported[{LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id}] = 15;
+    if (tunable) host::endpoint->reported[{ColorControl::Id, ColorControl::Attributes::ColorTemperatureMireds::Id}] = LIGHT_WARM_MIREDS;
+  }
+  refreshLightState();
+  checkState(true, publicLevel(matterLevel(175)), tunable ? LIGHT_COOL_MIREDS : LIGHT_DEFAULT_MIREDS);
+  checkOutput();
+  CHECK_EQ(host::endpoint->reported.at({OnOff::Id, OnOff::Attributes::OnOff::Id}), true);
+  CHECK_EQ(host::endpoint->reported.at({LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id}), matterLevel(175));
+  if (tunable) CHECK_EQ(host::endpoint->reported.at({ColorControl::Id, ColorControl::Attributes::ColorTemperatureMireds::Id}), LIGHT_COOL_MIREDS);
+  const unsigned expectedReports = tunable ? 3 : 2;
+  CHECK_EQ(esp_matter::attribute::reports, expectedReports);
+  CHECK_EQ(host::prefs.at(LEGACY_ONOFF), storedOn);
+  host::clearObservations();
+  CHECK(refreshLightState());
+  CHECK_EQ(esp_matter::attribute::reports, expectedReports);
+  CHECK(host::io.empty());
+  CHECK(setLightOnOff(false)); // Runtime off still updates the controller.
+  handleLight();
+  CHECK_EQ(host::endpoint->reported.at({OnOff::Id, OnOff::Attributes::OnOff::Id}), false);
+  CHECK_EQ(host::prefs.at(LEGACY_ONOFF), storedOn);
+  checkNoOnOffPersistence();
+}
+
+void startupReportsSavedStateAndKeepsLaterCommands() {
+  seed(false, 175, LIGHT_COOL_MIREDS);
+  CHECK(initLight());
+  restoreLightOutput();
+  using namespace chip::app::Clusters;
+  // The server is ready, but its stored attributes and cache are stale.
+  host::endpoint->on = false;
+  host::endpoint->level = 15;
+  if (tunable) host::endpoint->temperature = LIGHT_WARM_MIREDS;
+  CHECK(refreshLightState());
+  CHECK_EQ(esp_matter::attribute::reports, tunable ? 3 : 2);
+  CHECK_EQ(host::endpoint->reported.at({OnOff::Id, OnOff::Attributes::OnOff::Id}), true);
+  CHECK_EQ(host::endpoint->reported.at({LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id}), matterLevel(175));
+  if (tunable) CHECK_EQ(host::endpoint->reported.at({ColorControl::Id, ColorControl::Attributes::ColorTemperatureMireds::Id}), LIGHT_COOL_MIREDS);
+  CHECK_EQ(host::endpoint->getOnOff(), true);
+  checkState(true, publicLevel(matterLevel(175)), tunable ? LIGHT_COOL_MIREDS : LIGHT_DEFAULT_MIREDS);
+  CHECK(setLightOnOff(false));  // First command turns off at runtime.
+  handleLight();
+  CHECK_EQ(host::prefs.at(LEGACY_ONOFF), false);
+  CHECK(!getLightState().on);
+  CHECK(setLightOnOff(true));
+  handleLight();
+  checkState(true, publicLevel(matterLevel(175)), tunable ? LIGHT_COOL_MIREDS : LIGHT_DEFAULT_MIREDS);
+  CHECK_EQ(host::prefs.at(LEGACY_ONOFF), false);
+  checkNoOnOffPersistence();
+  host::clearObservations();
+  CHECK(refreshLightState());  // Repeated startup calls must never undo a new command.
+  CHECK(getLightState().on);
+  CHECK_EQ(host::endpoint->getOnOff(), true);
+  CHECK(host::io.empty());
+}
+
+void reportsCurrentStateOnSession() {
+  seed(false, 175, LIGHT_COOL_MIREDS);
+  CHECK(initLight());
+  restoreLightOutput();
+  CHECK(!reportLightState());
+  CHECK(refreshLightState());
+  CHECK(setLightOnOff(true));
+  CHECK(setLightBrightness(90));
+  handleLight();
+  const unsigned before = esp_matter::attribute::reports;
+  CHECK(reportLightState());
+  CHECK_EQ(esp_matter::attribute::reports - before, tunable ? 3 : 2);
+  using namespace chip::app::Clusters;
+  CHECK_EQ(host::endpoint->reported.at({OnOff::Id, OnOff::Attributes::OnOff::Id}), true);
+  CHECK_EQ(host::endpoint->reported.at({LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id}), matterLevel(90));
+  CHECK_EQ(host::prefs.at(LEGACY_ONOFF), false);
+  checkNoOnOffPersistence();
+  CHECK_EQ(host::endpoint->getOnOff(), true);
+  checkOutput();
+}
+
+void immediatePersistence() {
   boot();
   controller(false, matterLevel(15));
-  CHECK(host::writes.empty());
+  CHECK(host::writes.empty());  // Matter callback never writes NVS.
   handleLight();
-  host::now += LIGHT_SAVE_DELAY_MS - 1;
-  handleLight();
-  CHECK(host::writes.empty());
-  ++host::now;
-  handleLight();
-  expectOnlyWrite(PREF_ONOFF, false);
+  CHECK(host::writes.empty());  // Off is runtime-only.
+  checkNoOnOffPersistence();
   host::clearObservations();
   handleLight();
   flushLightPrefs();
-  CHECK(host::io.empty());
+  CHECK(host::io.empty());  // No writes when unchanged.
   CHECK(setLightBrightness(255));
   CHECK(host::writes.empty());
-  host::now += LIGHT_SAVE_DELAY_MS;
   handleLight();
   expectOnlyWrite(PREF_BRIGHTNESS, 255);
   CHECK(!getLightState().on);
   host::clearObservations();
   if (tunable) {
     CHECK(setLightTemperature(LIGHT_COOL_MIREDS));
-    host::now += LIGHT_SAVE_DELAY_MS;
     handleLight();
     expectOnlyWrite(PREF_TEMPERATURE, LIGHT_COOL_MIREDS);
   }
 }
 
-void debouncePersistence() {
+void everyObservedChangePersists() {
   boot();
-  const uint32_t first = host::now;
   controller(true, 80);
-  host::now = first + LIGHT_SAVE_DELAY_MS - 1;
+  handleLight();
+  expectOnlyWrite(PREF_BRIGHTNESS, publicLevel(80));
+  host::clearObservations();
   controller(true, 160);
-  handleLight();
-  host::now = first + LIGHT_SAVE_DELAY_MS;
-  handleLight();
-  CHECK(host::writes.empty());
-  host::now = first + 2 * LIGHT_SAVE_DELAY_MS - 2;
-  handleLight();
-  CHECK(host::writes.empty());
-  // Repeating an identical callback is not a change and must not starve saving.
-  controller(true, 160);
-  ++host::now;
   handleLight();
   expectOnlyWrite(PREF_BRIGHTNESS, publicLevel(160));
-}
-
-void rolloverPersistence() {
-  boot();
-  host::now = std::numeric_limits<uint32_t>::max() - LIGHT_SAVE_DELAY_MS / 2;
-  controller(false, matterLevel(15));
-  host::now += LIGHT_SAVE_DELAY_MS - 1;
+  host::clearObservations();
+  controller(true, 160);  // Repeated callback should not wear out NVS.
   handleLight();
   CHECK(host::writes.empty());
-  ++host::now;
-  handleLight();
-  expectOnlyWrite(PREF_ONOFF, false);
 }
 
 void flush() {
@@ -376,15 +536,15 @@ void flush() {
   if (tunable) CHECK(setLightTemperature(LIGHT_COOL_MIREDS));
   CHECK(host::io.empty());
   flushLightPrefs();
-  CHECK_EQ(host::writes.size(), tunable ? 3 : 2);
-  CHECK_EQ(host::prefs.at(PREF_ONOFF), false);
+  CHECK_EQ(host::writes.size(), tunable ? 2 : 1);
+  CHECK_EQ(host::prefs.at(LEGACY_ONOFF), true);
+  checkNoOnOffPersistence();
   CHECK_EQ(host::prefs.at(PREF_BRIGHTNESS), 255);
   if (tunable) CHECK_EQ(host::prefs.at(PREF_TEMPERATURE), LIGHT_COOL_MIREDS);
   CHECK(host::fades.empty());
   host::clearObservations();
   flushLightPrefs();
   CHECK(host::io.empty());
-  host::now += LIGHT_SAVE_DELAY_MS;
   handleLight();
   CHECK(host::writes.empty());
   checkOutput();
@@ -394,14 +554,14 @@ void failedWriteIsRetried() {
   boot();
   CHECK(setLightBrightness(255));
   host::failNextPrefWrite = PREF_BRIGHTNESS;
-  flushLightPrefs();
+  handleLight();
   CHECK_EQ(host::writes.size(), 1);
   CHECK(host::prefs.at(PREF_BRIGHTNESS) != 255);
   host::clearObservations();
-  flushLightPrefs();
+  handleLight();
   expectOnlyWrite(PREF_BRIGHTNESS, 255);
   host::clearObservations();
-  flushLightPrefs();
+  handleLight();
   CHECK(host::writes.empty());
 }
 
@@ -416,10 +576,8 @@ void factoryReset() {
   CHECK(host::prefs.empty());
   host::clearObservations();
   flushLightPrefs();
-  host::now += LIGHT_SAVE_DELAY_MS;
   handleLight();
   controller(true, 100);
-  host::now += LIGHT_SAVE_DELAY_MS;
   handleLight();
   refreshLightState();
   flushLightPrefs();
@@ -548,9 +706,16 @@ const std::vector<Case> cases = {
   {"restore-minimum", [] { restored(true, 1, LIGHT_DEFAULT_MIREDS); }},
   {"restore-temperature-low", [] { restored(true, 15, 0); }},
   {"restore-temperature-high", [] { restored(true, 15, 65535); }},
-  {"deferred-changed-keys", deferredPersistence},
-  {"debounce-persistence", debouncePersistence},
-  {"rollover-persistence", rolloverPersistence},
+  {"startup-readback-failure-retries", startupReadbackFailureRetries},
+  {"startup-retry-keeps-boot-on", startupRetryKeepsBootOn},
+  {"startup-callbacks-cannot-overwrite-boot-on", startupCallbacksCannotOverwriteBootOn},
+  {"restart-stale-matter-on", [] { restartWithStaleMatterAttributes(true); }},
+  {"restart-legacy-off-ignored", [] { restartWithStaleMatterAttributes(false); }},
+  {"restart-stale-matter-cache", [] { restartWithStaleMatterAttributes(false, true); }},
+  {"startup-reports-state-and-accepts-first-command", startupReportsSavedStateAndKeepsLaterCommands},
+  {"report-current-state-on-session", reportsCurrentStateOnSession},
+  {"immediate-persistence", immediatePersistence},
+  {"every-observed-change-persists", everyObservedChangePersists},
   {"flush", flush},
   {"failed-write-retry", failedWriteIsRetried},
   {"factory-reset", factoryReset},

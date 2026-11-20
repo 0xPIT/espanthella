@@ -5,6 +5,7 @@
 
 #include <Arduino.h>
 #include <Matter.h>
+#include <atomic>
 
 #include "config.h"
 #include "identity.h"
@@ -17,10 +18,14 @@
 
 static MatterButton button;
 static bool wasCommissioned = false;
+static bool lightSynchronized = false;
+static std::atomic<bool> matterServerReady{false};
+static bool matterReadyLogged = false;
+static std::atomic<bool> matterSessionReportPending{false};
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  //delay(1000);
 
   buildDeviceIdentity();
   Serial.printf("\nespANTHELLA [%s] starting\n", deviceId);
@@ -30,6 +35,7 @@ void setup() {
     Serial.println("Light initialization failed; stopping before Matter starts.");
     while (true) delay(1000);
   }
+  restoreLightOutput();
   button.begin(PIN_BUTTON, INPUT_PULLUP);
 
 #if defined(ARDUINO_XIAO_ESP32C6)
@@ -37,8 +43,14 @@ void setup() {
 #endif
   provisionWiFi();
 
+  Matter.onEvent([](matterEvent_t event, const chip::DeviceLayer::ChipDeviceEvent *) {
+    if (event == MATTER_SERVER_READY) matterServerReady.store(true);
+    if (event == MATTER_SECURE_SESSION_ESTABLISHED) {
+      // CHIP task: report from loop(), using the current state, not boot NVS.
+      matterSessionReportPending.store(true);
+    }
+  });
   Matter.begin();
-  refreshLightState();
 
   if (!Matter.isDeviceCommissioned()) {
     Serial.println("Matter not commissioned — scan QR code or enter pairing code.");
@@ -56,6 +68,16 @@ void setup() {
 }
 
 void loop() {
+  if (matterServerReady.load() && !matterReadyLogged) {
+    Serial.println("Matter: server ready; publishing restored light attributes");
+    matterReadyLogged = true;
+  }
+  if (!lightSynchronized && matterServerReady.load()) {
+    lightSynchronized = refreshLightState();
+  }
+  if (lightSynchronized && matterSessionReportPending.exchange(false)) {
+    if (!reportLightState()) matterSessionReportPending.store(true);
+  }
   handleWebClients();
 #if defined(ARDUINO_XIAO_ESP32C6)
   handleAntenna();

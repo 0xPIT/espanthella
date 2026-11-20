@@ -233,9 +233,9 @@
 
   /* toggle switch */
   sw.addEventListener('change', function(){
-    var b = parseInt(bri.value, 10);
-    if (this.checked && b === 0) b = 128;
-    queueChanges({on: this.checked ? 1 : 0, brightness: b});
+    // An on/off click must not resend the browser's possibly stale brightness:
+    // Matter may have changed it since the last poll (or while this page loaded).
+    queueChanges({on: this.checked ? 1 : 0});
   });
 
   /* sliders — debounced POST, instant visual feedback */
