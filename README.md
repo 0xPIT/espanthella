@@ -36,7 +36,8 @@ Built with the Arduino-ESP32 Matter library on top of [Espressif's ESP-Matter](h
 - **Local controls** through touch-dimming in 3 levels.
 - **Browser control** with an on/off switch and brightness slider, synchronized with external changes.
 - **Wi-Fi setup portal** no network credentials compiled into the firmware.
-- **Persistent state** for the last on/off setting and brightness.
+- **Optional WW/CW tunable white** using two PWM outputs and a Matter color-temperature light endpoint; the default single-channel build remains a dimmable light.
+- **Persistent state** for the last on/off setting, brightness, and (on WW/CW builds) color temperature.
 - **Maintenance tools** for pairing, resets, and firmware uploads.
 
 > [!IMPORTANT]
@@ -103,6 +104,13 @@ The setup AP is open by default. Provision the device in a trusted environment. 
 ### 3 · Pair with Matter
 
 Open the dashboard while the device is uncommissioned. In your Matter controller's app, add a device and scan the displayed **QR code**, or enter the **manual pairing code**. The manual code is also printed to serial.
+
+The usual 11-digit setup code is displayed as **`XXXX-XXX-XXXX`**; ignore the
+dashes when entering it. Formatting preserves the original digits and check digit.
+The QR code is generated locally from the decoded **`MT:...`** Matter payload,
+not from the library's QR-generator URL or its percent-encoded `data` parameter.
+It uses black modules on white with a scanner quiet zone. If the payload or QR
+renderer is unavailable, the page shows a message directing you to the setup code.
 
 After commissioning, the lamp appears as a dimmable light. Keep the controller and device on a network that allows local discovery and IPv6 traffic; guest/client isolation can prevent pairing or control.
 
@@ -181,6 +189,8 @@ The dashboard follows the lamp's understated character: a small line-drawn lamp 
 | --- | --- |
 | **WiFi** | Network name, IP address, RSSI, and MAC address. |
 | **Light** | Matter commissioning status, on/off control, and a brightness slider. |
+| **PWM outputs (WW/CW builds)** | Swap the cool and warm PWM destinations without changing Matter temperature. |
+| **WiFi antenna (XIAO ESP32C6)** | Switch between the internal ceramic and external antenna. |
 | **Pair this device** | QR code and manual code before commissioning. |
 | **System** | Hostname, uptime, free heap, chip model, and flash size. |
 | **Actions** | Matter reset, Wi-Fi reset, factory reset, reboot, and firmware upload. |
@@ -199,7 +209,7 @@ The light controls poll for external state changes every three seconds, so chang
 | Recognized touch | Advance through four brightness steps, including off. |
 | Dashboard → Reset Matter Provisioning | Remove Matter provisioning so the device can be paired again. |
 | Dashboard → Reset WiFi Credentials | Erase Wi-Fi credentials and reboot into setup mode. |
-| Dashboard → Factory Reset | Erase Matter provisioning, Wi-Fi credentials, and saved light state. |
+| Dashboard → Factory Reset | Erase Matter provisioning, Wi-Fi credentials, saved light state, and (on XIAO) antenna selection. |
 
 The startup code also checks for a held button to reset Wi-Fi credentials. On the C6, holding BOOT through reset can instead select ROM download mode; use the dashboard reset when available.
 
@@ -237,19 +247,147 @@ Upload `combined.bin` through **Dashboard → Firmware Update** to include both 
 
 ## Development
 
+### Single-channel and WW/CW hardware
+
+The default environment keeps the existing hardware and Matter device type:
+`MatterDimmableLight`, with GPIO7 driving the single-channel LED-driver input.
+The optional `tunable` environment uses `MatterColorTemperatureLight` instead,
+with `PIN_PWM` driving **WW** and a separately assigned GPIO driving **CW**.
+Both variants share the state, gamma correction, PWM, touch, and persistence code.
+
+**The generic `tunable` environment does not select a CW GPIO automatically.** Verify a free output-capable pin on
+your exact board and circuit, then add `-DLIGHT_CW_PIN=<GPIO number>` to the
+`tunable` environment's `build_flags` in [platformio.ini](platformio.ini).
+The tunable build deliberately fails until this is assigned. Do not use GPIO12/13
+(USB on C6), the touch/button pins, or a pin occupied by another peripheral.
+Use suitable independently controlled LED drivers, not LEDs directly on GPIOs.
+Two-wire polarity-reversing tunable LEDs require a different driver interface.
+
+After assigning the pin:
+
+```sh
+pio run -e tunable
+pio run -e tunable -t upload
+```
+
+Always select the matching hardware environment when building firmware. The
+`ota` environment inherits the XIAO ESP32C6 WW/CW configuration; do not use that
+image on single-channel hardware. The partition-table/OTA limitations described
+above still apply.
+
+Temperature settings in [include/config.h](include/config.h) can also be
+customized with build flags:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `LIGHT_TUNABLE_WHITE` | `0` (`1` in `tunable`) | Compile-time hardware and Matter endpoint selection. |
+| `LIGHT_WW_PIN` | Board default | Single-channel or WW output GPIO. |
+| `LIGHT_CW_PIN` | Unassigned | Required CW output GPIO for WW/CW hardware. |
+| `LIGHT_TOUCH_ENABLED` | `1` | Set to `0` to compile out touch calibration and sensing. |
+| `LIGHT_WARM_KELVIN` | `2700` | Rated WW endpoint. |
+| `LIGHT_COOL_KELVIN` | `6500` | Rated CW endpoint. |
+| `LIGHT_DEFAULT_KELVIN` | Warm endpoint | Temperature used when no saved setting exists. |
+
+The installed Arduino endpoint supports **2000–10000 K**; the firmware rejects
+configurations outside that range. It sets Matter's physical temperature limits
+to the configured LED endpoints before starting the stack. Matter and the HTTP
+API use integer **mireds** (`1,000,000 / Kelvin`), so the dashboard's Kelvin labels
+may differ slightly from the nominal LED ratings after conversion.
+
+At a given brightness, the firmware gamma-corrects the total PWM duty, then
+splits it between WW and CW linearly in mireds. The target duties sum to the same
+total across the temperature range; the midpoint does not drive both outputs at
+full duty. This is an approximate mix, not photometric/colorimetric calibration.
+Different channel efficacy can still change perceived brightness.
+
+Temperature can be changed while off without turning on either output. Touch
+continues to cycle brightness only; it preserves the selected temperature. The
+dashboard shows temperature control only on the WW/CW build. **WW/CW hardware
+operation and controller interoperability still need testing on the actual lamp.**
+
+Keep the selected hardware mode stable once commissioned. If an existing device
+is changed from single-channel to WW/CW (or back), remove it from the Matter
+controller, reset Matter provisioning, and pair it again; controllers may cache
+the endpoint type and capabilities. The existing on/off and brightness preference
+keys are preserved across firmware upgrades.
+
+### Seeed Studio XIAO ESP32C6 WW/CW build
+
+The separate `seeed_xiao_esp32c6` environment selects the XIAO board and
+configures two adjacent header pins using the Arduino board aliases
+`LIGHT_WW_PIN=D8` and `LIGHT_CW_PIN=D9`:
+
+| Output | Header label | GPIO |
+| --- | --- | --- |
+| WW PWM | **D8** | **19** |
+| CW PWM | **D9** | **20** |
+
+These are also the board's SPI SCK/MISO pins; do not use SPI on them at the same
+time. They avoid USB, the BOOT button, the onboard LED, and antenna-control pins.
+
+Only the XIAO ESP32C6 build has an **External antenna** switch on the setup portal
+and dashboard. Off uses the internal ceramic antenna (the default); attach an
+external antenna before switching it on. The selection is saved independently of WiFi
+credentials and restored before the WiFi station or setup AP starts. The board's
+RF switch is enabled with GPIO3 LOW; GPIO14 LOW selects internal and HIGH selects
+external. Saving a new selection may briefly interrupt the portal connection.
+WiFi reset keeps the choice; factory reset restores the internal default.
+
+The dashboard's **Swap CW and WW** switch exchanges the duties sent to WW
+(D8/GPIO19) and CW (D9/GPIO20) when the drivers are wired in reverse. It takes
+effect after saving, is restored on reboot, and is cleared by factory reset.
+The Matter temperature range and its values do not change. Single-channel
+builds hide the control and reject the setting.
+
+The environment sets `LIGHT_TOUCH_ENABLED=0`, excluding both startup calibration
+and runtime touch sensing, with no access to the unused touch pin. The BOOT
+button remains available for the normal button controls.
+
+```sh
+pio run -e seeed_xiao_esp32c6
+pio run -e seeed_xiao_esp32c6 -t upload
+```
+
+### Light HTTP API
+
+`GET /api/light` returns, for example on a WW/CW build:
+
+```json
+{"on":true,"brightness":128,"supportsColorTemperature":true,"temperature":250,"minTemperature":153,"maxTemperature":370}
+```
+
+`POST /api/light` accepts URL-encoded partial updates:
+
+- `on=0` or `on=1`.
+- `brightness=0..255`. Zero turns off and retains the previous nonzero brightness;
+  nonzero values update the stored level, including while off. Send `on=1` too
+  when a brightness change should turn the light on.
+- `temperature=<positive integer mireds>` on WW/CW builds, clamped to the physical
+  range without changing the on/off state. Single-channel builds reject it.
+
+Brightness uses the UI scale 0–255; the light API maps nonzero values to Matter's
+valid CurrentLevel range 1–254. The temperature capability flag is authoritative;
+temperature fields are not adjustable on a single-channel build. Invalid requests
+return HTTP 400 before applying any fields.
+
+State is saved after one second without a change, writing only changed preference
+keys. Intentional web reboots/updates flush pending state; an abrupt power loss
+within that one-second window can lose the most recent adjustment. Factory reset
+cancels pending saves so cleared preferences are not recreated.
+
 ### Dimming configuration
 
 The defaults in [include/config.h](include/config.h) are:
 
 | Setting | Default |
 | --- | --- |
-| PWM frequency | 19,550 Hz |
+| PWM frequency | 14,550 Hz |
 | PWM resolution | 10 bit, duty 0–1023 |
 | Gamma exponent | 1.9 |
 | Fade duration | 20 ms |
 | Local brightness steps | 4, including off |
 
-Matter brightness is represented as 0–255 and mapped through the gamma lookup table to the PWM duty. To inspect the actual table generated from the project source:
+UI brightness is represented as 0–255 and mapped through the gamma lookup table to the PWM duty; Matter's nonzero 1–254 levels are scaled to this range. To inspect the actual table generated from the project source:
 
 ```sh
 pio run -e default -t printgamma
@@ -257,11 +395,39 @@ pio run -e default -t printgamma
 
 This diagnostic target also requires a host C++ compiler available as `g++`. Explicitly selecting `default` matters: the OTA environment does not register this target.
 
+### Regression tests
+
+Run the dependency-free host suites without an ESP32 connected:
+
+```sh
+python3 scripts/test_light_host.py
+python3 scripts/test_light_host.py --board xiao --mode 1
+c++ -std=c++20 -DARDUINO_XIAO_ESP32C6 -Itest/host/support -Iinclude \
+  src/antenna.cpp test/host/antenna_test.cpp -o /tmp/espanthella-antenna-test
+/tmp/espanthella-antenna-test
+node test/dashboard.test.cjs
+```
+
+The C++ suite requires Python 3.8+ and a C++20 compiler. It compiles the actual
+light module in both hardware modes against small Arduino/Matter/LEDC test
+stubs, and checks mixing, brightness conversion, callback queuing, restored state,
+deferred persistence, resets, driver errors, and configuration guards. These are
+logic tests, not a substitute for the real Matter stack and LED-driver hardware.
+The suites also check URL-decoding and validation of Matter QR payloads, dashed
+manual setup codes (including leading zeroes), and QR-renderer error handling.
+The antenna host test checks the XIAO GPIO sequence, persistence, deferred
+switching, and factory reset. The Node suite exercises the dashboard's actual
+inline controller, including capability visibility, Kelvin conversion,
+off-state temperature changes, and serialized requests/stale-response protection.
+
 ### Project map
 
 | Location | Contents |
 | --- | --- |
-| [src/light.cpp](src/light.cpp) | Matter light callbacks, gamma table, LEDC output, and touch handling. |
+| [src/light.cpp](src/light.cpp) | Private Matter endpoint, shared light state, gamma table, LEDC outputs, deferred persistence, and touch handling. |
+| [include/light.h](include/light.h) | Hardware-independent API used by the button, touch, and web controls. |
+| [include/light_math.h](include/light_math.h) | Host-testable brightness conversion and constant-sum WW/CW mixing. |
+| [src/antenna.cpp](src/antenna.cpp) | XIAO ESP32C6 RF-switch configuration and saved antenna selection. |
 | [src/wifi_portal.cpp](src/wifi_portal.cpp) | Wi-Fi connection, credential storage, and captive portal. |
 | [src/web_mgmt.cpp](src/web_mgmt.cpp) | Dashboard, light-control API, resets, and HTTP updates. |
 | [data/](data/) | Locally served HTML, CSS, JavaScript, and SVG icon. |

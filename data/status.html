@@ -35,18 +35,56 @@
     <div class="row">
       <span class="lbl">Brightness</span>
       <div class="brightness" id="bri-wrap">
-        <input type="range" id="bri" min="0" max="255" value="%BRIGHTNESS_RAW%">
+        <input type="range" id="bri" aria-label="Brightness" min="0" max="255" value="%BRIGHTNESS_RAW%">
         <span class="pct" id="bri-pct">%BRIGHTNESS%</span>
       </div>
     </div>
+    <div class="row" id="temp-row" style="%TEMPERATURE_DISPLAY%">
+      <span class="lbl">Temperature</span>
+      <div class="brightness">
+        <input type="range" id="temp" aria-label="Color temperature in Kelvin" min="%TEMPERATURE_MIN_K%" max="%TEMPERATURE_MAX_K%" value="%TEMPERATURE_KELVIN%">
+        <span class="pct" id="temp-value">%TEMPERATURE_KELVIN% K</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" style="%SWAP_DISPLAY%">
+    <h3>PWM outputs</h3>
+    <form action="/swap-cw-ww" method="POST">
+      <div class="row setting-row">
+        <label class="lbl setting-label" for="swap-cw-ww">Swap CW and WW</label>
+        <label class="toggle">
+          <input type="checkbox" id="swap-cw-ww" name="swap" value="1" aria-label="Swap CW and WW" %SWAP_CHECKED%>
+          <span class="track"></span>
+        </label>
+      </div>
+      <p class="antenna-hint">Use if the cool and warm drivers are connected to the opposite outputs. Applies immediately after saving and persists after reboot.</p>
+      <button type="submit">Save PWM outputs</button>
+    </form>
+  </div>
+
+  <div class="section" style="%ANTENNA_DISPLAY%">
+    <h3>WiFi antenna</h3>
+    <form action="/antenna" method="POST">
+      <div class="row setting-row">
+        <label class="lbl setting-label" for="external-antenna">External antenna</label>
+        <label class="toggle">
+          <input type="checkbox" id="external-antenna" name="antenna" value="external" aria-label="External antenna" %ANTENNA_CHECKED%>
+          <span class="track"></span>
+        </label>
+      </div>
+      <p class="antenna-hint">Off uses the internal ceramic antenna. Connect an external antenna before turning this on. Switching may briefly interrupt WiFi; the selection is saved across reboots.</p>
+      <button type="submit">Save antenna</button>
+    </form>
   </div>
 
   <div class="section" id="pair" style="%PAIR_DISPLAY%">
     <h3>Pair this device</h3>
     <div class="pair">
-      <div id="qr"></div>
-      <div class="code">%PAIRING_CODE%</div>
-      <p class="hint">Scan the QR code or manually enter this code<br>in your Matter controller app (Apple, Google, Ikea, etc.)</p>
+      <div id="qr" role="img" aria-label="Matter pairing QR code"></div>
+      <p class="hint" id="qr-error" role="status" hidden>QR code unavailable. Use the setup code below.</p>
+      <div class="code" aria-label="Matter setup code">%PAIRING_CODE%</div>
+      <p class="hint">Scan in your Matter controller app<br>or enter the setup code above (ignore the dashes).</p>
     </div>
   </div>
 
@@ -112,8 +150,15 @@
   var s=document.getElementById('pair');
   if(!s||s.style.display==='none')return;
   var payload='%QR_PAYLOAD%';
-  if(!payload)return;
-  new QRCode(document.getElementById('qr'),{text:payload,width:180,height:180,colorDark:'#1A1A1A',colorLight:'#ffffff',correctLevel:QRCode.CorrectLevel.M});
+  var qr=document.getElementById('qr');
+  var error=document.getElementById('qr-error');
+  try {
+    if(!/^MT:[0-9A-Z.-]+$/.test(payload))throw new Error('Invalid Matter payload');
+    new QRCode(qr,{text:payload,width:180,height:180,colorDark:'#000000',colorLight:'#ffffff',correctLevel:QRCode.CorrectLevel.M});
+  } catch(e) {
+    qr.hidden=true;
+    error.hidden=false;
+  }
 })();
 </script>
 <script>
@@ -122,7 +167,12 @@
   var bri  = document.getElementById('bri');
   var pct  = document.getElementById('bri-pct');
   var wrap = document.getElementById('bri-wrap');
-  var busy = false, hold = null;
+  var temp = document.getElementById('temp');
+  var tempRow = document.getElementById('temp-row');
+  var tempValue = document.getElementById('temp-value');
+  var busy = false, hold = null, debounce = null;
+  var sending = false, pending = {};
+  var editRevision = 0, pollRevision = 0;
 
   function markBusy() {
     busy = true;
@@ -131,45 +181,85 @@
   }
 
   function fmtPct(v) { return Math.round(v * 100 / 255) + '%'; }
+  function kelvin(mireds) { return Math.round(1000000 / mireds); }
+  function hasPending() { return Object.keys(pending).length > 0; }
 
   function applyUI(s) {
     sw.checked = s.on;
     bri.value = s.brightness;
     pct.textContent = s.on ? fmtPct(s.brightness) : 'OFF';
     wrap.classList.toggle('off', !s.on);
+    tempRow.style.display = s.supportsColorTemperature ? '' : 'none';
+    if (s.supportsColorTemperature) {
+      temp.min = kelvin(s.maxTemperature);
+      temp.max = kelvin(s.minTemperature);
+      temp.value = kelvin(s.temperature);
+      tempValue.textContent = temp.value + ' K';
+    }
   }
 
-  function send(on, brightness) {
-    markBusy();
+  // Serialize writes and merge pending fields so brightness/temperature drags
+  // cannot overwrite one another with stale full-state requests.
+  function sendPending() {
+    if (sending || !hasPending()) return;
+    var changes = pending;
+    pending = {};
+    sending = true;
+    var body = Object.keys(changes).map(function(key){
+      return encodeURIComponent(key) + '=' + encodeURIComponent(changes[key]);
+    }).join('&');
     fetch('/api/light', {
       method: 'POST',
       headers: {'Content-Type':'application/x-www-form-urlencoded'},
-      body: 'on=' + (on?1:0) + '&brightness=' + brightness
-    }).then(function(r){ return r.json(); }).then(applyUI).catch(function(){});
+      body: body
+    }).then(function(r){
+      if (!r.ok) throw new Error('Light update failed');
+      return r.json();
+    }).then(function(s){
+      if (!hasPending()) applyUI(s);
+    }).catch(function(){}).then(function(){
+      sending = false;
+      if (hasPending()) sendPending();
+    });
+  }
+
+  function queueChanges(changes) {
+    ++editRevision;
+    markBusy();
+    Object.keys(changes).forEach(function(key){ pending[key] = changes[key]; });
+    clearTimeout(debounce);
+    debounce = setTimeout(sendPending, 150);
   }
 
   /* toggle switch */
   sw.addEventListener('change', function(){
-    var b = parseInt(bri.value);
+    var b = parseInt(bri.value, 10);
     if (this.checked && b === 0) b = 128;
-    send(this.checked, b);
+    queueChanges({on: this.checked ? 1 : 0, brightness: b});
   });
 
-  /* brightness slider — throttled POST, instant visual feedback */
-  var briT = null;
+  /* sliders — debounced POST, instant visual feedback */
   bri.addEventListener('input', function(){
-    var v = parseInt(this.value);
+    var v = parseInt(this.value, 10);
     pct.textContent = v > 0 ? fmtPct(v) : 'OFF';
     wrap.classList.toggle('off', v === 0);
     sw.checked = v > 0;
-    clearTimeout(briT);
-    briT = setTimeout(function(){ send(v > 0, v); }, 150);
+    queueChanges({on: v > 0 ? 1 : 0, brightness: v});
+  });
+  temp.addEventListener('input', function(){
+    var k = parseInt(this.value, 10);
+    tempValue.textContent = k + ' K';
+    // Temperature can be prepared while off without switching the lamp on.
+    queueChanges({temperature: Math.round(1000000 / k)});
   });
 
   /* poll for external changes (Matter controller, touch sensor, etc.) */
   setInterval(function(){
-    if (busy) return;
-    fetch('/api/light').then(function(r){ return r.json(); }).then(applyUI).catch(function(){});
+    if (busy || sending || hasPending()) return;
+    var edits = editRevision, poll = ++pollRevision;
+    fetch('/api/light').then(function(r){ return r.json(); }).then(function(s){
+      if (edits === editRevision && poll === pollRevision && !busy && !sending && !hasPending()) applyUI(s);
+    }).catch(function(){});
   }, 3000);
 
   /* set initial visual state */

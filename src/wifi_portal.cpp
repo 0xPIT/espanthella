@@ -6,6 +6,7 @@
 #include "wifi_portal.h"
 #include "config.h"
 #include "identity.h"
+#include "antenna.h"
 #include "fs_html.h"
 
 #include <Arduino.h>
@@ -67,6 +68,18 @@ static void handleSave() {
     return;
   }
 
+#if defined(ARDUINO_XIAO_ESP32C6)
+  // An unchecked checkbox is omitted; also accept the old dropdown's "internal".
+  if (portalServer.hasArg("antenna") && portalServer.arg("antenna") != "internal" &&
+      portalServer.arg("antenna") != "external") {
+    portalServer.send(400, "text/plain", "Invalid antenna selection");
+    return;
+  }
+  if (!saveAntenna(portalServer.hasArg("antenna") && portalServer.arg("antenna") == "external")) {
+    portalServer.send(500, "text/plain", "Could not save antenna selection");
+    return;
+  }
+#endif
   wifiPref.begin(WIFI_PREF_NAMESPACE, false);
   wifiPref.putString("ssid", ssid);
   wifiPref.putString("password", password);
@@ -125,6 +138,13 @@ static void runCaptivePortal() {
   portalServer.on("/", HTTP_GET, []() {
     String page = readHtmlFile("/portal.html");
     page.replace("%NETWORKS%", cachedNetworks);
+#if defined(ARDUINO_XIAO_ESP32C6)
+    page.replace("%ANTENNA_DISPLAY%", "");
+    page.replace("%ANTENNA_CHECKED%", isExternalAntenna() ? "checked" : "");
+#else
+    page.replace("%ANTENNA_DISPLAY%", "display:none");
+    page.replace("%ANTENNA_CHECKED%", "");
+#endif
     portalServer.send(200, "text/html", page);
   });
 
@@ -142,6 +162,9 @@ static void runCaptivePortal() {
   while (!credsSaved) {
     dnsServer.processNextRequest();
     portalServer.handleClient();
+#if defined(ARDUINO_XIAO_ESP32C6)
+    handleAntenna();
+#endif
     delay(2);
   }
 
@@ -152,6 +175,10 @@ static void runCaptivePortal() {
     delay(2);
   }
 
+#if defined(ARDUINO_XIAO_ESP32C6)
+  // The setup AP is no longer needed; restore the chosen path before STA reconnects.
+  handleAntenna();
+#endif
   portalServer.stop();
   dnsServer.stop();
   WiFi.softAPdisconnect(true);

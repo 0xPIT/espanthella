@@ -7,6 +7,8 @@
 #include "config.h"
 #include "identity.h"
 #include "light.h"
+#include "antenna.h"
+#include "matter_pairing.h"
 #include "wifi_portal.h"
 #include "fs_html.h"
 
@@ -46,15 +48,14 @@ static String actionPage(const char *title, const char *heading, const char *mes
 
 static void handleRoot() {
   bool commissioned = Matter.isDeviceCommissioned();
-  uint8_t brightness = DimmableLight.getBrightness();
+  const LightState light = getLightState();
+  const uint8_t brightness = light.brightness;
 
-  String qrPayload;
+  std::string qrPayload;
+  std::string pairingCode;
   if (!commissioned) {
-    String qrUrl = Matter.getOnboardingQRCodeUrl();
-    int32_t idx = qrUrl.indexOf("data=");
-    if (idx >= 0) {
-      qrPayload = qrUrl.substring(idx + 5);
-    }
+    qrPayload = MatterPairing::qrPayload(Matter.getOnboardingQRCodeUrl().c_str());
+    pairingCode = MatterPairing::formatManualCode(Matter.getManualPairingCode().c_str());
   }
 
   String page = readHtmlFile("/status.html");
@@ -63,26 +64,82 @@ static void handleRoot() {
   page.replace("%WIFI_RSSI%",     String(WiFi.RSSI()));
   page.replace("%WIFI_MAC%",      WiFi.macAddress());
   page.replace("%MATTER_STATUS%", commissioned ? "Commissioned" : "Not commissioned");
-  page.replace("%LIGHT_STATE%",   DimmableLight ? "ON" : "OFF");
-  page.replace("%LIGHT_CHECKED%", DimmableLight ? "checked" : "");
+  page.replace("%LIGHT_STATE%",   light.on ? "ON" : "OFF");
+  page.replace("%LIGHT_CHECKED%", light.on ? "checked" : "");
   page.replace("%BRIGHTNESS%",    String(brightness * 100 / 255) + "%");
   page.replace("%BRIGHTNESS_RAW%", String(brightness));
+  page.replace("%TEMPERATURE_DISPLAY%", supportsColorTemperature() ? "" : "display:none");
+  page.replace("%SWAP_DISPLAY%", supportsColorTemperature() ? "" : "display:none");
+  page.replace("%SWAP_CHECKED%", isCwWwSwapped() ? "checked" : "");
+  page.replace("%TEMPERATURE_KELVIN%", String((1000000UL + light.temperature / 2) / light.temperature));
+  // Use the representable mired endpoints, so the UI and Matter agree exactly.
+  page.replace("%TEMPERATURE_MIN_K%", String((1000000UL + LIGHT_WARM_MIREDS / 2) / LIGHT_WARM_MIREDS));
+  page.replace("%TEMPERATURE_MAX_K%", String((1000000UL + LIGHT_COOL_MIREDS / 2) / LIGHT_COOL_MIREDS));
   page.replace("%PAIR_DISPLAY%",  commissioned ? "display:none" : "");
-  page.replace("%PAIRING_CODE%",  commissioned ? "" : Matter.getManualPairingCode());
-  page.replace("%QR_PAYLOAD%",    qrPayload);
+  page.replace("%PAIRING_CODE%",  commissioned ? "" : pairingCode.empty() ? "Unavailable" : pairingCode.c_str());
+  page.replace("%QR_PAYLOAD%",    qrPayload.c_str());
   page.replace("%HOSTNAME%",      String(hostName) + ".local");
   page.replace("%UPTIME%",        formatUptime());
   page.replace("%FREE_HEAP%",     String(ESP.getFreeHeap() / 1024));
   page.replace("%CHIP_MODEL%",    String(ESP.getChipModel()));
   page.replace("%FLASH_SIZE%",    String(ESP.getFlashChipSize() / (1024 * 1024)));
+#if defined(ARDUINO_XIAO_ESP32C6)
+  page.replace("%ANTENNA_DISPLAY%", "");
+  page.replace("%ANTENNA_CHECKED%", isExternalAntenna() ? "checked" : "");
+#else
+  page.replace("%ANTENNA_DISPLAY%", "display:none");
+  page.replace("%ANTENNA_CHECKED%", "");
+#endif
   server.send(200, "text/html", page);
 }
+
+// ── WW/CW output configuration ───────────────────────────────────────
+
+static void handleSetCwWwSwap() {
+  if (!supportsColorTemperature()) {
+    server.send(404, "text/plain", "WW/CW outputs unavailable");
+    return;
+  }
+  // An unchecked checkbox is omitted; also accept the old dropdown's "0".
+  if (server.hasArg("swap") && server.arg("swap") != "0" && server.arg("swap") != "1") {
+    server.send(400, "text/plain", "Invalid swap setting");
+    return;
+  }
+  if (!setCwWwSwapped(server.hasArg("swap") && server.arg("swap") == "1")) {
+    server.send(500, "text/plain", "Could not save WW/CW output setting");
+    return;
+  }
+  server.sendHeader("Location", "/", true);
+  server.send(303, "text/plain", "WW/CW output setting saved");
+}
+
+// ── Antenna configuration (XIAO ESP32C6 only) ────────────────────────
+
+#if defined(ARDUINO_XIAO_ESP32C6)
+static void handleSetAntenna() {
+  // An unchecked checkbox is omitted; also accept the old dropdown's "internal".
+  if (server.hasArg("antenna") && server.arg("antenna") != "internal" &&
+      server.arg("antenna") != "external") {
+    server.send(400, "text/plain", "Invalid antenna selection");
+    return;
+  }
+  if (!saveAntenna(server.hasArg("antenna") && server.arg("antenna") == "external")) {
+    server.send(500, "text/plain", "Could not save antenna selection");
+    return;
+  }
+  server.send(200, "text/html",
+    actionPage("Antenna Saved", "Antenna selection saved",
+               "The WiFi connection may briefly disconnect as the antenna switches."));
+}
+#endif
 
 // ── Reset / reboot handlers ──────────────────────────────────────────
 
 static void handleResetMatter() {
   Serial.println("Web: Matter decommission requested");
-  DimmableLight = false;
+  setLightOnOff(false);
+  handleLight();
+  flushLightPrefs();
   Matter.decommission();
   server.send(200, "text/html",
     actionPage("Matter Reset",
@@ -93,6 +150,7 @@ static void handleResetMatter() {
 
 static void handleResetWifi() {
   Serial.println("Web: WiFi credential reset requested");
+  flushLightPrefs();
   clearWiFiCredentials();
   server.send(200, "text/html",
     actionPage("WiFi Reset",
@@ -104,10 +162,14 @@ static void handleResetWifi() {
 
 static void handleFactoryReset() {
   Serial.println("Web: Factory reset requested");
-  DimmableLight = false;
+  setLightOnOff(false);
+  handleLight();
   Matter.decommission();
   clearWiFiCredentials();
   clearLightPrefs();
+#if defined(ARDUINO_XIAO_ESP32C6)
+  clearAntennaPreferences();
+#endif
   server.send(200, "text/html",
     actionPage("Factory Reset",
                "&#128165; Factory Reset Complete",
@@ -118,6 +180,7 @@ static void handleFactoryReset() {
 
 static void handleReboot() {
   Serial.println("Web: Reboot requested");
+  flushLightPrefs();
   server.send(200, "text/html",
     actionPage("Reboot",
                "&#128260; Rebooting&hellip;",
@@ -246,6 +309,7 @@ static void handleUpdateResult() {
     server.send(500, "text/plain", "Update failed");
   }
   else {
+    flushLightPrefs();
     server.send(200, "text/plain", "OK");
     delay(500);
     ESP.restart();
@@ -255,23 +319,58 @@ static void handleUpdateResult() {
 // ── Light control API ────────────────────────────────────────────────
 
 static void handleGetLight() {
-  char json[64];
-  snprintf(json, sizeof(json), "{\"on\":%s,\"brightness\":%u}",
-           (bool)DimmableLight ? "true" : "false",
-           DimmableLight.getBrightness());
+  const LightState light = getLightState();
+  char json[256];
+  snprintf(json, sizeof(json),
+           "{\"on\":%s,\"brightness\":%u,\"supportsColorTemperature\":%s,"
+           "\"temperature\":%u,\"minTemperature\":%u,\"maxTemperature\":%u}",
+           light.on ? "true" : "false", light.brightness,
+           supportsColorTemperature() ? "true" : "false",
+           light.temperature, LIGHT_COOL_MIREDS, LIGHT_WARM_MIREDS);
   server.send(200, "application/json", json);
 }
 
+// Validate the complete request before changing any attributes. In particular,
+// never wrap a negative/oversized temperature into uint16_t.
+static bool parseLightArg(const char *name, uint32_t maximum, uint32_t &value) {
+  const String text = server.arg(name);
+  if (text.isEmpty()) return false;
+  value = 0;
+  for (unsigned int i = 0; i < text.length(); ++i) {
+    if (text[i] < '0' || text[i] > '9') return false;
+    const uint32_t digit = text[i] - '0';
+    if (digit > maximum || value > (maximum - digit) / 10) return false;
+    value = value * 10 + digit;
+  }
+  return true;
+}
+
 static void handleSetLight() {
-  bool    on  = (bool)DimmableLight;
-  uint8_t bri = DimmableLight.getBrightness();
+  const bool hasOn = server.hasArg("on");
+  const bool hasBrightness = server.hasArg("brightness");
+  const bool hasTemperature = server.hasArg("temperature");
+  uint32_t on = getLightState().on;
+  uint32_t brightness = 0, temperature = 0;
+  if ((hasOn && !parseLightArg("on", 1, on)) ||
+      (hasBrightness && !parseLightArg("brightness", 255, brightness)) ||
+      (hasTemperature && (!supportsColorTemperature() ||
+                         !parseLightArg("temperature", UINT16_MAX, temperature) || temperature == 0))) {
+    server.send(400, "application/json", "{\"error\":\"Invalid or unsupported light parameter\"}");
+    return;
+  }
 
-  if (server.hasArg("on"))         on  = server.arg("on") != "0";
-  if (server.hasArg("brightness")) bri = constrain(server.arg("brightness").toInt(), 0, 255);
-
-  DimmableLight.setOnOff(on);
-  if (on) DimmableLight.setBrightness(bri);
-
+  // Turn off first, but prepare brightness/temperature before turning on.
+  const bool changeOn = hasOn || (hasBrightness && brightness == 0);
+  if (hasBrightness && brightness == 0) on = false;
+  bool ok = true;
+  if (changeOn && !on) ok &= setLightOnOff(false);
+  if (hasBrightness && brightness > 0) ok &= setLightBrightness(brightness);
+  if (hasTemperature) ok &= setLightTemperature(temperature);
+  if (changeOn && on) ok &= setLightOnOff(true);
+  if (!ok) {
+    server.send(500, "application/json", "{\"error\":\"Could not update light\"}");
+    return;
+  }
   handleGetLight();
 }
 
@@ -282,6 +381,10 @@ void startManagementServer() {
   server.serveStatic("/qrcode.min.js", LittleFS, "/qrcode.min.js");
   server.serveStatic("/favicon.svg", LittleFS, "/favicon.svg");
   server.on("/",              HTTP_GET,  handleRoot);
+  server.on("/swap-cw-ww",    HTTP_POST, handleSetCwWwSwap);
+#if defined(ARDUINO_XIAO_ESP32C6)
+  server.on("/antenna",       HTTP_POST, handleSetAntenna);
+#endif
   server.on("/api/light",     HTTP_GET,  handleGetLight);
   server.on("/api/light",     HTTP_POST, handleSetLight);
   server.on("/reset-matter",  HTTP_GET,  handleResetMatter);

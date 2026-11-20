@@ -45,12 +45,26 @@ def print_gamma(source, target, env):
 
     inst = m2.group(1).replace("static constexpr", "const")
 
+    # Only the numeric gamma/PWM settings are needed on the host. Including
+    # config.h itself would pull in ESP-specific soc headers and GPIO checks.
+    with open(os.path.join(project_dir, "include", "config.h")) as f:
+        config = f.read()
+    constants = []
+    for name in ("PWM_RESOLUTION", "PWM_MAX_DUTY", "BRIGHTNESS_GAMMA"):
+        setting = re.search(r"constexpr\s+\w+\s+" + name + r"\s*=\s*[^;]+;", config)
+        if not setting:
+            print(f"Error: could not find {name} in config.h")
+            env.Exit(1)
+        constants.append(setting.group(0))
+    settings = "\n".join(constants)
+
     host_src = f"""\
 #include <cstdio>
 #include <cstdint>
 #include <cmath>
 #include <array>
-#include "config.h"
+
+{settings}
 
 {func}
 

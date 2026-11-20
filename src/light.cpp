@@ -5,22 +5,104 @@
 
 #include "light.h"
 #include "config.h"
+#include "light_math.h"
 
 #include <Arduino.h>
+#include <Matter.h>
 #include <Preferences.h>
 #include <array>
+#include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "esp_err.h"
 
-MatterDimmableLight DimmableLight;
+#ifdef RGB_VERBOSE
+// Arduino may encode the RGB LED as a virtual pin above the GPIO range.
+static constexpr int RGB_GPIO = RGB_BUILTIN >= SOC_GPIO_PIN_COUNT
+                                  ? RGB_BUILTIN - SOC_GPIO_PIN_COUNT : RGB_BUILTIN;
+static_assert(PIN_PWM != RGB_GPIO && (!LIGHT_TUNABLE_WHITE || PIN_PWM_CW != RGB_GPIO),
+              "PWM must not share the RGB debug LED GPIO");
+#endif
+
+#if LIGHT_TUNABLE_WHITE
+static MatterColorTemperatureLight matterLight;
+static_assert(LIGHT_COOL_MIREDS >= MatterColorTemperatureLight::MIN_COLOR_TEMPERATURE &&
+              LIGHT_WARM_MIREDS <= MatterColorTemperatureLight::MAX_COLOR_TEMPERATURE,
+              "LED range exceeds the Arduino temperature endpoint's supported range");
+#else
+static MatterDimmableLight matterLight;
+#endif
 
 static Preferences matterPref;
+static bool lightReady = false;
+static bool prefsEnabled = false;
+static LightState savedState;
+#if LIGHT_TUNABLE_WHITE
+static bool swapCwWw = false;
+#endif
+
+// The Matter callback can run on another task. Only publish a snapshot there;
+// loop() owns all PWM and Preferences calls, including deferred writes.
+static portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
+struct PendingLight {
+  LightState state;
+  uint32_t changedAt;
+};
+static PendingLight pendingLight = {{false, 15, LIGHT_DEFAULT_MIREDS}, 0};
+
+static PendingLight readPendingLight() {
+  portENTER_CRITICAL(&stateMux);
+  PendingLight pending = pendingLight;
+  portEXIT_CRITICAL(&stateMux);
+  return pending;
+}
+
+LightState getLightState() {
+  return readPendingLight().state;
+}
+
+bool supportsColorTemperature() {
+  return LIGHT_TUNABLE_WHITE;
+}
+
+bool isCwWwSwapped() {
+#if LIGHT_TUNABLE_WHITE
+  return swapCwWw;
+#else
+  return false;
+#endif
+}
+
+bool setCwWwSwapped([[maybe_unused]] bool swapped) {
+#if LIGHT_TUNABLE_WHITE
+  if (!lightReady || !prefsEnabled) return false;
+  if (swapped == swapCwWw) return true;
+  // Save first: a failed NVS write must not leave the UI claiming a choice
+  // that will be lost on reboot.
+  if (matterPref.putBool(PREF_SWAP_CW_WW, swapped) != 1) return false;
+  swapCwWw = swapped;
+  handleLight();  // Reassign the current duties even if Matter state did not change.
+  return true;
+#else
+  return false;
+#endif
+}
 
 // ── Native LEDC configuration ────────────────────────────────────────
 
-static constexpr ledc_mode_t    LEDC_MODE    = LEDC_LOW_SPEED_MODE;
-static constexpr ledc_timer_t   LEDC_TIMER   = LEDC_TIMER_0;
-static constexpr ledc_channel_t LEDC_CHANNEL = LEDC_CHANNEL_0;
+static constexpr ledc_mode_t  LEDC_MODE  = LEDC_LOW_SPEED_MODE;
+static constexpr ledc_timer_t LEDC_TIMER = LEDC_TIMER_0;
+
+struct PwmChannel {
+  int pin;
+  ledc_channel_t channel;
+  uint32_t lastDuty = UINT32_MAX;
+};
+static PwmChannel pwmChannels[] = {
+  {PIN_PWM, LEDC_CHANNEL_0},
+#if LIGHT_TUNABLE_WHITE
+  {PIN_PWM_CW, LEDC_CHANNEL_1},
+#endif
+};
 
 // ── Gamma correction LUT (compile-time) ─────────────────────────────
 // test resulting curves at https://victornpb.github.io/gamma-table-generator/
@@ -41,13 +123,22 @@ static constexpr auto GAMMA_LUT = makeGammaLUT<256>(BRIGHTNESS_GAMMA, PWM_MAX_DU
 
 // ── PWM output ───────────────────────────────────
 
-static uint32_t lastPwmDuty = UINT32_MAX;
+static bool checkLightError(esp_err_t err) {
+  if (err == ESP_OK) return true;
+  Serial.printf("Light driver error: %s\n", esp_err_to_name(err));
+  return false;
+}
 
-static void setPwmDuty(uint32_t duty) {
-  if (duty == lastPwmDuty) return;
-  lastPwmDuty = duty;
-  ledc_set_fade_with_time(LEDC_MODE, LEDC_CHANNEL, duty, PWM_FADE_MS);
-  ledc_fade_start(LEDC_MODE, LEDC_CHANNEL, LEDC_FADE_NO_WAIT);
+static void setPwmDuty(PwmChannel &output, uint32_t duty) {
+  if (duty == output.lastDuty) return;
+#if SOC_LEDC_SUPPORT_FADE_STOP
+  // C6 can replace an in-flight fade; older targets wait for its completion.
+  if (!checkLightError(ledc_fade_stop(LEDC_MODE, output.channel))) return;
+#endif
+  if (!checkLightError(ledc_set_fade_with_time(LEDC_MODE, output.channel, duty, PWM_FADE_MS))) return;
+  if (checkLightError(ledc_fade_start(LEDC_MODE, output.channel, LEDC_FADE_NO_WAIT))) {
+    output.lastDuty = duty;
+  }
 }
 
 // ── RGB LED (WS2812B) — mirrors brightness on boards with RGB_BUILTIN ─
@@ -61,21 +152,102 @@ static void setRgbLed(bool state, uint8_t brightness) {
 
 // ── Light state callback (called by Matter stack) ────────────────────
 
-bool setLightState(bool state, uint8_t brightness) {
-  uint32_t duty = state ? GAMMA_LUT[brightness] : 0;
-
-  setPwmDuty(duty);
-#ifdef RGB_VERBOSE
-  setRgbLed(state, brightness);
-#endif
-
-  matterPref.putBool(PREF_ONOFF, state);
-  matterPref.putUChar(PREF_BRIGHTNESS, brightness);
+static bool queueLightState(bool on, uint8_t brightness, uint16_t temperature) {
+  if (LIGHT_TUNABLE_WHITE && (temperature < LIGHT_COOL_MIREDS || temperature > LIGHT_WARM_MIREDS)) {
+    return false;
+  }
+  const LightState state = {on, brightnessFromMatter(brightness), temperature};
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&stateMux);
+  if (   pendingLight.state.on != state.on
+      || pendingLight.state.brightness != state.brightness
+      || pendingLight.state.temperature != state.temperature)
+  {
+    pendingLight = {state, now};
+  }
+  portEXIT_CRITICAL(&stateMux);
   return true;
+}
+
+static void saveLightState(const LightState &state) {
+  if (!prefsEnabled) return;
+  if (state.on != savedState.on && matterPref.putBool(PREF_ONOFF, state.on)) {
+    savedState.on = state.on;
+  }
+  if (state.brightness != savedState.brightness && matterPref.putUChar(PREF_BRIGHTNESS, state.brightness)) {
+    savedState.brightness = state.brightness;
+  }
+#if LIGHT_TUNABLE_WHITE
+  if (state.temperature != savedState.temperature && matterPref.putUShort(PREF_TEMPERATURE, state.temperature)) {
+    savedState.temperature = state.temperature;
+  }
+#endif
+}
+
+void flushLightPrefs() {
+  saveLightState(getLightState());
+}
+
+void handleLight() {
+  if (!lightReady) return;
+  const PendingLight pending = readPendingLight();
+  const LightState &state = pending.state;
+  const uint16_t totalDuty = state.on ? GAMMA_LUT[state.brightness] : 0;
+  const LightDuties duties = mixLightDuty(totalDuty, state.temperature,
+                                        LIGHT_COOL_MIREDS, LIGHT_WARM_MIREDS,
+                                        supportsColorTemperature());
+#if LIGHT_TUNABLE_WHITE
+  // Swap the duty destinations, not Matter temperature or the configured GPIOs.
+  setPwmDuty(pwmChannels[0], swapCwWw ? duties.cool : duties.warm);
+  setPwmDuty(pwmChannels[1], swapCwWw ? duties.warm : duties.cool);
+#else
+  setPwmDuty(pwmChannels[0], duties.warm);
+#endif
+#ifdef RGB_VERBOSE
+  static uint16_t lastRgb = UINT16_MAX;
+  const uint16_t rgb = state.on ? state.brightness : 0;
+  if (rgb != lastRgb) {
+    setRgbLed(state.on, state.brightness);
+    lastRgb = rgb;
+  }
+#endif
+  if (millis() - pending.changedAt >= LIGHT_SAVE_DELAY_MS) {
+    saveLightState(state);
+  }
+}
+
+bool setLightOnOff(bool on) {
+  return lightReady && matterLight.setOnOff(on);
+}
+
+bool setLightBrightness(uint8_t brightness) {
+  if (!lightReady) return false;
+  if (brightness == 0) return setLightOnOff(false);
+  return matterLight.setBrightness(brightnessToMatter(brightness));
+}
+
+bool setLightTemperature([[maybe_unused]] uint16_t mireds) {
+#if LIGHT_TUNABLE_WHITE
+  return lightReady && matterLight.setColorTemperature(
+    clampLightTemperature(mireds, LIGHT_COOL_MIREDS, LIGHT_WARM_MIREDS));
+#else
+  return false;
+#endif
+}
+
+bool toggleLight() {
+  return setLightOnOff(!getLightState().on);
+}
+
+void refreshLightState() {
+  if (!lightReady) return;
+  matterLight.updateAccessory();
+  handleLight();
 }
 
 // ── Touch sensor — brightness cycle ──────────────────────────────────
 
+#if LIGHT_TOUCH_ENABLED
 static uint8_t  brightnessStep = 0;
 static bool     touchActive    = false;
 static uint32_t lastTouchTime  = 0;
@@ -87,11 +259,11 @@ static void onTouch() {
   Serial.printf("Touch: step %u → brightness %u%%\n", brightnessStep, brightness * 100 / 255);
 
   if (brightnessStep == 0) {
-    DimmableLight.setOnOff(false);
+    setLightOnOff(false);
   }
   else {
-    DimmableLight.setOnOff(true);
-    DimmableLight.setBrightness(brightness);
+    setLightBrightness(brightness);
+    setLightOnOff(true);
   }
 }
 
@@ -190,11 +362,37 @@ void handleTouch() {
   }
 }
 
-#endif
+#endif  // SOC_TOUCH_SENSOR_SUPPORTED
+#else
+void handleTouch() {}  // No pin access, ADC sampling, or touch state when disabled.
+#endif  // LIGHT_TOUCH_ENABLED
 
 // ── Init / teardown ──────────────────────────────────────────────────
 
-void initLight() {
+#if LIGHT_TUNABLE_WHITE
+static bool configureTemperatureRange() {
+  using namespace chip::app::Clusters;
+  esp_matter_attr_val_t cool = esp_matter_uint16(LIGHT_COOL_MIREDS);
+  esp_matter_attr_val_t warm = esp_matter_uint16(LIGHT_WARM_MIREDS);
+  // These are read-only to controllers, but can be configured locally before
+  // Matter.begin(). Also keep the level/temperature coupling minimum in range.
+  return matterLight.setAttributeVal(ColorControl::Id,
+           ColorControl::Attributes::ColorTempPhysicalMinMireds::Id, &cool) &&
+         matterLight.setAttributeVal(ColorControl::Id,
+           ColorControl::Attributes::ColorTempPhysicalMaxMireds::Id, &warm) &&
+         matterLight.setAttributeVal(ColorControl::Id,
+           ColorControl::Attributes::CoupleColorTempToLevelMinMireds::Id, &cool);
+}
+#endif
+
+bool initLight() {
+  // Validate output capability as well as pin numbers before touching GPIOs.
+  for (const PwmChannel &output : pwmChannels) {
+    if (!GPIO_IS_VALID_OUTPUT_GPIO(output.pin)) {
+      Serial.printf("Invalid PWM output GPIO: %d\n", output.pin);
+      return false;
+    }
+  }
   ledc_timer_config_t timer_conf = {
     .speed_mode      = LEDC_MODE,
     .duty_resolution = static_cast<ledc_timer_bit_t>(PWM_RESOLUTION),
@@ -202,46 +400,59 @@ void initLight() {
     .freq_hz         = PWM_FREQ,
     .clk_cfg         = LEDC_AUTO_CLK,
   };
-  ledc_timer_config(&timer_conf);
+  if (!checkLightError(ledc_timer_config(&timer_conf))) return false;
 
-  ledc_channel_config_t channel_conf = {
-    .gpio_num   = PIN_PWM,
-    .speed_mode = LEDC_MODE,
-    .channel    = LEDC_CHANNEL,
-    .intr_type  = LEDC_INTR_DISABLE,
-    .timer_sel  = LEDC_TIMER,
-    .duty       = 0,
-    .hpoint     = 0,
-  };
-  ledc_channel_config(&channel_conf);
-
-  ledc_fade_func_install(0);
+  for (const PwmChannel &output : pwmChannels) {
+    ledc_channel_config_t channel_conf = {
+      .gpio_num   = output.pin,
+      .speed_mode = LEDC_MODE,
+      .channel    = output.channel,
+      .intr_type  = LEDC_INTR_DISABLE,
+      .timer_sel  = LEDC_TIMER,
+      .duty       = 0,
+      .hpoint     = 0,
+    };
+    if (!checkLightError(ledc_channel_config(&channel_conf))) return false;
+  }
+  if (!checkLightError(ledc_fade_func_install(0))) return false;
+#if LIGHT_TOUCH_ENABLED
 #if SOC_TOUCH_SENSOR_SUPPORTED
   touchRead(PIN_TOUCH);        // prime the native touch peripheral
 #else
-  touchCalibrate();            // measure charge-time baseline (no touch)
+  touchCalibrate();            // measure charge-decay baseline (no touch)
+#endif
 #endif
 
-  matterPref.begin(MATTER_PREF_NAMESPACE, false);
-  bool    lastOnOff      = matterPref.getBool(PREF_ONOFF, true);
-  uint8_t lastBrightness = matterPref.getUChar(PREF_BRIGHTNESS, 15);
-
-  DimmableLight.begin(lastOnOff, lastBrightness);
-  DimmableLight.onChange(setLightState);
-#ifdef RGB_VERBOSE
-  setRgbLed(lastOnOff, lastBrightness);
+  if (!matterPref.begin(MATTER_PREF_NAMESPACE, false)) return false;
+  prefsEnabled = true;
+  savedState = {matterPref.getBool(PREF_ONOFF, true),
+                matterPref.getUChar(PREF_BRIGHTNESS, 15),
+                matterPref.getUShort(PREF_TEMPERATURE, LIGHT_DEFAULT_MIREDS)};
+#if LIGHT_TUNABLE_WHITE
+  swapCwWw = matterPref.getBool(PREF_SWAP_CW_WW, false);
 #endif
-
-  DimmableLight.onChangeOnOff([](bool state) {
-    Serial.printf("Light OnOff → %s\r\n", state ? "ON" : "OFF");
-    return true;
+  const bool on = savedState.on && savedState.brightness != 0;
+  const uint8_t brightness = brightnessToMatter(savedState.brightness ? savedState.brightness : 15);
+#if LIGHT_TUNABLE_WHITE
+  const uint16_t temperature = clampLightTemperature(savedState.temperature,
+                                                    LIGHT_COOL_MIREDS, LIGHT_WARM_MIREDS);
+  if (!matterLight.begin(on, brightness, temperature) || !configureTemperatureRange()) return false;
+  matterLight.onChange(queueLightState);
+#else
+  if (!matterLight.begin(on, brightness)) return false;
+  matterLight.onChange([](bool on, uint8_t brightness) {
+    return queueLightState(on, brightness, LIGHT_DEFAULT_MIREDS);
   });
-  DimmableLight.onChangeBrightness([](uint8_t level) {
-    Serial.printf("Light Brightness → %u\r\n", level);
-    return true;
-  });
+#endif
+  lightReady = true;
+  return true;
 }
 
 void clearLightPrefs() {
+  // Factory reset must not allow a queued callback to repopulate preferences.
+  prefsEnabled = false;
   matterPref.clear();
+#if LIGHT_TUNABLE_WHITE
+  swapCwWw = false;
+#endif
 }

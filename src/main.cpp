@@ -11,6 +11,8 @@
 #include "fs_html.h"
 #include "wifi_portal.h"
 #include "light.h"
+#include "matter_pairing.h"
+#include "antenna.h"
 #include "web_mgmt.h"
 
 static MatterButton button;
@@ -24,37 +26,49 @@ void setup() {
   Serial.printf("\nespANTHELLA [%s] starting\n", deviceId);
 
   initFileSystem();
-  initLight();
+  if (!initLight()) {
+    Serial.println("Light initialization failed; stopping before Matter starts.");
+    while (true) delay(1000);
+  }
   button.begin(PIN_BUTTON, INPUT_PULLUP);
 
+#if defined(ARDUINO_XIAO_ESP32C6)
+  initAntenna();  // Restore RF path before starting the station or setup AP.
+#endif
   provisionWiFi();
 
   Matter.begin();
+  refreshLightState();
 
   if (!Matter.isDeviceCommissioned()) {
     Serial.println("Matter not commissioned — scan QR code or enter pairing code.");
-    Serial.printf("  Manual code : %s\n", Matter.getManualPairingCode().c_str());
+    const auto pairingCode = MatterPairing::formatManualCode(Matter.getManualPairingCode().c_str());
+    Serial.printf("  Manual code : %s\n", pairingCode.empty() ? "Unavailable" : pairingCode.c_str());
     Serial.printf("  QR code URL : %s\n", Matter.getOnboardingQRCodeUrl().c_str());
   }
 
   startManagementServer();
 
-  Serial.printf("Initial state: %s | brightness: %u\r\n",
-                DimmableLight ? "On" : "Off",
-                DimmableLight.getBrightness());
-
-  DimmableLight.updateAccessory();
+  const LightState state = getLightState();
+  Serial.printf("Initial state: %s | brightness: %u | temperature control: %s\r\n",
+                state.on ? "On" : "Off", state.brightness,
+                supportsColorTemperature() ? "WW/CW" : "fixed");
 }
 
 void loop() {
   handleWebClients();
+#if defined(ARDUINO_XIAO_ESP32C6)
+  handleAntenna();
+#endif
   handleTouch();
+  handleLight();
 
   if (Matter.isDeviceCommissioned()) {
     wasCommissioned = true;
   } 
   else if (wasCommissioned) {
     Serial.println("Matter fabric removed. Restarting.");
+    flushLightPrefs();
     delay(500);
     ESP.restart();
   }
@@ -63,11 +77,13 @@ void loop() {
   while ((ev = button.poll()) != MATTER_BUTTON_NONE) {
     if (ev == MATTER_BUTTON_CLICK) {
       Serial.println("Button: toggling light");
-      DimmableLight.toggle();
+      toggleLight();
     } 
     else if (ev == MATTER_BUTTON_LONG_HOLD) {
       Serial.println("Button: decommissioning");
-      DimmableLight = false;
+      setLightOnOff(false);
+      handleLight();
+      flushLightPrefs();
       Matter.decommission();
     }
   }

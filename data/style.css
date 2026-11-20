@@ -162,6 +162,8 @@ label {
 .row .lbl   { color: var(--text-secondary); font-weight: 300; }
 .row .val   { color: var(--text); font-weight: 400; text-align: right;
               max-width: 60%; word-break: break-all; }
+.setting-row .setting-label { margin: 0; font-size: inherit; letter-spacing: 0;
+                              text-transform: none; cursor: pointer; }
 
 /* ── Dashboard navigation ──────────────────────────────────────────── */
 
@@ -191,6 +193,7 @@ input[type=file] {
 }
 
 select:focus, input:focus { border-color: var(--accent); }
+.antenna-hint { margin-top: .6rem; font-size: .78rem; }
 
 button[type=submit] {
   width: 100%; padding: .85rem; border: none;
@@ -246,13 +249,17 @@ button[type=submit]:active { background: #000; }
 /* ── Pairing QR code ───────────────────────────────────────────────── */
 
 .pair { text-align: center; padding-top: .6rem; }
-.pair svg,
 .pair #qr {
-  width: 180px; height: 180px; margin: 1rem auto; display: block;
-  border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 8px; background: var(--card);
+  width: 244px; max-width: 100%; margin: 1rem auto; display: inline-block;
+  /* Keep at least four QR modules of white quiet zone on every side. */
+  padding: 32px; background: #fff;
 }
-.pair #qr { width: auto; height: auto; display: inline-block; }
+.pair #qr[hidden] { display: none; }
+.pair #qr canvas,
+.pair #qr img {
+  width: 100%; height: auto;
+  image-rendering: pixelated;
+}
 .pair .code {
   font-family: 'Courier New', monospace;
   font-size: 1.3rem; font-weight: 500;
@@ -309,6 +316,8 @@ button[type=submit]:active { background: #000; }
   display: flex;
   align-items: center;
   gap: .6rem;
+  min-width: 0;
+  margin-left: .75rem;
   transition: opacity .3s;
 }
 .brightness.off { opacity: .3; }
@@ -317,6 +326,8 @@ button[type=submit]:active { background: #000; }
   -webkit-appearance: none;
   appearance: none;
   width: 120px; height: 4px;
+  min-width: 0;
+  flex: 1 1 120px;
   background: var(--border);
   border-radius: 2px;
   outline: none;
@@ -349,6 +360,8 @@ button[type=submit]:active { background: #000; }
   color: var(--text-secondary);
   font-weight: 300;
   min-width: 3em;
+  flex-shrink: 0;
+  white-space: nowrap;
   text-align: right;
 }
 

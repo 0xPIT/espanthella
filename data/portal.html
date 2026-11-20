@@ -22,6 +22,16 @@
     <label for="password">Password</label>
     <input type="password" name="password" id="password"
            placeholder="WiFi password">
+    <div style="%ANTENNA_DISPLAY%">
+      <div class="row setting-row">
+        <label class="lbl setting-label" for="external-antenna">External antenna</label>
+        <label class="toggle">
+          <input type="checkbox" name="antenna" id="external-antenna" value="external" aria-label="External antenna" %ANTENNA_CHECKED%>
+          <span class="track"></span>
+        </label>
+      </div>
+      <p class="antenna-hint">Off uses the internal ceramic antenna. Connect an external antenna before turning this on. The setup connection may briefly drop when switching.</p>
+    </div>
     <button type="submit">Connect</button>
   </form>
   <div class="foot">
